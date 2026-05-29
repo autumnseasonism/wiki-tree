@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# OS / 编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# 临时产物
+*.tmp
+*.log
+
+# 参考归档：非 skill 本体，体积大(54MB/3763 文件)且含内嵌 git 仓库(openhuman/)，不纳入基线
+openhuman-archive/
