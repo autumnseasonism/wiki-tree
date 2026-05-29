@@ -115,6 +115,35 @@ def main():
         run(SC / "convert_documents.py", "--scan-report", rep, "--output", cv)
         check("同源重转无 -1 重复", not list((cv / "documents").glob("*-1.md")))
 
+        # ---------- 3b. 真实 .docx：L8 表格提取 + M1 有效文档成功路径 ----------
+        print("[3b] convert 真实 docx (L8)")
+        try:
+            import docx as _docx  # python-docx
+            _have_docx = True
+        except ImportError:
+            _have_docx = False
+        if not _have_docx:
+            print("  SKIP 真实 docx 测试（python-docx 未安装）")
+        else:
+            dd = W / "dd"; dd.mkdir()
+            docp = dd / "real.docx"
+            _d = _docx.Document()
+            _d.add_heading("报告标题", level=1)
+            _d.add_paragraph("正文段落内容。")
+            _t = _d.add_table(rows=2, cols=2)
+            _t.rows[0].cells[0].text = "姓名"; _t.rows[0].cells[1].text = "年龄"
+            _t.rows[1].cells[0].text = "张三"; _t.rows[1].cells[1].text = "30"
+            _d.save(str(docp))
+            repd = W / "dd.json"
+            repd.write_text(json.dumps(report([(str(docp), "word")]), ensure_ascii=False), encoding="utf-8")
+            dv = W / "dv"; run(SC / "convert_documents.py", "--scan-report", repd, "--output", dv)
+            crd = jload(dv / "_conversion_report.json")
+            st = crd["details"][0]["status"]
+            md = (dv / "documents/real.md").read_text(encoding="utf-8") if (dv / "documents/real.md").exists() else ""
+            check("M1: 有效 docx 转换成功", st == "success", st)
+            check("docx 段落保留", "正文段落内容" in md)
+            check("L8: docx 表格渲染为 Markdown 表格", "| 姓名 | 年龄 |" in md and "| 张三 | 30 |" in md, md[:200])
+
         # ---------- 4. update_manifest ----------
         print("[4] update_manifest")
         mv = W / "mv"; run(SC / "generate_wiki_structure.py", "--output", mv)
@@ -143,6 +172,13 @@ def main():
         check("L6: C++ 符号实体被保留", "C++" in kept, str(kept))
         check("AI 子串误放被丢", "AI" not in kept)
         check("上下文 中文子串保留", "上下文" in kept)
+        # L6 已知取舍（有意行为，固化以防回归）：粘连更多字符时不命中
+        doc2 = W / "ve2.md"; doc2.write_text("用 C++11 和 ASP.NET 开发。", encoding="utf-8")
+        ents2 = W / "ve2.json"
+        ents2.write_text(json.dumps({"entities": [{"kind": "concept", "text": "C++"},
+                                                   {"kind": "concept", "text": ".NET"}]}, ensure_ascii=False), encoding="utf-8")
+        kept2 = {e["text"] for e in jload_str(run(SC / "verify_entities.py", "--doc", doc2, "--entities", ents2).stdout)["entities"]}
+        check("L6 取舍(已知): C++ 不命中 C++11、.NET 不命中 ASP.NET", "C++" not in kept2 and ".NET" not in kept2, str(kept2))
 
         # ---------- 6. compute_centrality: F4 degree=不同邻居数 ----------
         print("[6] compute_centrality")

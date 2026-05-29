@@ -44,6 +44,8 @@ def entity_present(text: str, content: str) -> bool:
     if is_ascii(text):
         # 用 (?<!\w)…(?!\w) 而非 \b…\b：既阻止 "AI" 命中 "WAIT" 这类子串，
         # 又能正确匹配首尾为符号的实体（如 C++ / .NET），避免误杀。
+        # 已知取舍：实体粘连更多字符时不命中（"C++" 不命中 "C++11"、".NET" 不命中 "ASP.NET"），
+        # 属可接受的窄边角，整体仍优于 \b。
         return re.search(r"(?<!\w)" + re.escape(text) + r"(?!\w)", content, re.IGNORECASE) is not None
     return text in content
 

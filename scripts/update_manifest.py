@@ -58,7 +58,14 @@ def load_manifest(vault: Path) -> dict:
         with open(mpath, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        print(f"警告: manifest 损坏或不可读，将重置为空（已处理状态会丢失）: {mpath}", file=sys.stderr)
+        # 非破坏性：先把损坏的 manifest 备份到 .corrupt，再重置（原 done 状态可从备份人工恢复）
+        backup = mpath.with_suffix(".json.corrupt")
+        try:
+            import shutil
+            shutil.copy2(mpath, backup)
+            print(f"警告: manifest 损坏，已备份到 {backup} 后重置（done 状态可从该备份恢复）", file=sys.stderr)
+        except OSError:
+            print(f"警告: manifest 损坏且备份失败，将重置为空（已处理状态会丢失）: {mpath}", file=sys.stderr)
         data = {}
     if not isinstance(data, dict):
         data = {}
