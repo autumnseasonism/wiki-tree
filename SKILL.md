@@ -98,7 +98,7 @@ python scripts/scan_folder.py {目标路径} --vault {vault} -o {vault}/.memory-
 
 **PDF (.pdf)**：
 ```
-逐页提取文本 → 合并连续段落 → 去除页眉页脚 → 输出 Markdown
+逐页提取文本 → 每页加 `<!-- 第 N 页 -->` 标注 → 输出 Markdown（注：暂不做段落合并/页眉页脚剥离；扫描版图片型 PDF 需 OCR，见 FAQ）
 ```
 
 **Markdown (.md)**：

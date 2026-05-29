@@ -42,7 +42,9 @@ def entity_present(text: str, content: str) -> bool:
     if not text:
         return False
     if is_ascii(text):
-        return re.search(r"\b" + re.escape(text) + r"\b", content, re.IGNORECASE) is not None
+        # 用 (?<!\w)…(?!\w) 而非 \b…\b：既阻止 "AI" 命中 "WAIT" 这类子串，
+        # 又能正确匹配首尾为符号的实体（如 C++ / .NET），避免误杀。
+        return re.search(r"(?<!\w)" + re.escape(text) + r"(?!\w)", content, re.IGNORECASE) is not None
     return text in content
 
 

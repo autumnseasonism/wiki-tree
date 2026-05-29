@@ -20,7 +20,7 @@ def convert_word(file_path: str) -> str:
     try:
         from docx import Document
     except ImportError:
-        return f"<!-- 错误: 需要安装 python-docx: pip install python-docx -->"
+        raise RuntimeError("缺少依赖 python-docx，无法转换 .docx：pip install python-docx")
 
     doc = Document(file_path)
     lines = []
@@ -46,6 +46,25 @@ def convert_word(file_path: str) -> str:
         else:
             lines.append(text)
 
+    # 表格：追加在段落之后（防御性——失败不影响段落提取）
+    try:
+        for ti, table in enumerate(doc.tables):
+            trows = [[(c.text or "").strip().replace("|", "\\|") for c in row.cells]
+                     for row in table.rows]
+            trows = [r for r in trows if any(r)]
+            if not trows:
+                continue
+            w = max(len(r) for r in trows)
+            pad = lambda r: r + [""] * (w - len(r))
+            lines.append("")
+            lines.append(f"<!-- 表格 {ti + 1} -->")
+            lines.append("| " + " | ".join(pad(trows[0])) + " |")
+            lines.append("| " + " | ".join(["---"] * w) + " |")
+            for r in trows[1:]:
+                lines.append("| " + " | ".join(pad(r)) + " |")
+    except Exception:
+        pass
+
     return "\n".join(lines)
 
 
@@ -54,7 +73,7 @@ def convert_pdf(file_path: str) -> str:
     try:
         import fitz  # PyMuPDF
     except ImportError:
-        return f"<!-- 错误: 需要安装 PyMuPDF: pip install PyMuPDF -->"
+        raise RuntimeError("缺少依赖 PyMuPDF，无法转换 .pdf：pip install PyMuPDF")
 
     doc = fitz.open(file_path)
     pages = []
@@ -75,7 +94,7 @@ def convert_json(file_path: str) -> str:
         with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        return f"<!-- JSON 解析错误: {e} -->"
+        raise RuntimeError(f"JSON 解析失败: {e}") from e
 
     return json_to_markdown(data, level=2)
 
@@ -117,7 +136,7 @@ def convert_text(file_path: str) -> str:
             with open(file_path, "r", encoding="gbk") as f:
                 content = f.read()
         except UnicodeDecodeError:
-            return "<!-- 无法解码文件（尝试了 UTF-8 和 GBK） -->"
+            raise RuntimeError("无法解码文件（尝试了 UTF-8 和 GBK）")
 
     # 简单的段落检测：连续非空行合并为段落
     paragraphs = []
@@ -156,7 +175,7 @@ def convert_csv(file_path: str) -> str:
         except UnicodeDecodeError:
             continue
     if rows is None:
-        return "<!-- 无法解码 CSV（尝试了 UTF-8 和 GBK） -->"
+        raise RuntimeError("无法解码 CSV（尝试了 UTF-8 和 GBK）")
     rows = [r for r in rows if any((c or "").strip() for c in r)]  # 丢弃全空行
     if not rows:
         return ""
@@ -220,8 +239,10 @@ def process_file(file_info: dict, output_dir: Path, content_hashes: dict = None)
 
     try:
         if category == "markdown":
-            with open(source_path, "r", encoding="utf-8") as f:
-                content = f.read()
+            try:
+                content = Path(source_path).read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                content = Path(source_path).read_text(encoding="gbk")
         else:
             converter = CONVERTERS.get(category)
             if not converter:

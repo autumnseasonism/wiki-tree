@@ -58,6 +58,7 @@ def load_manifest(vault: Path) -> dict:
         with open(mpath, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        print(f"警告: manifest 损坏或不可读，将重置为空（已处理状态会丢失）: {mpath}", file=sys.stderr)
         data = {}
     if not isinstance(data, dict):
         data = {}
