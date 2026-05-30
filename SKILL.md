@@ -1,10 +1,10 @@
 ---
 name: local-memory-wiki
-description: "Use when user wants to build a personal knowledge wiki from local documents. Scans a folder for Word/PDF/Markdown/JSON/text files, converts to Markdown, extracts memories (entities, relationships, topics), and outputs an Obsidian-compatible wiki with hierarchical summaries. Inspired by OpenHuman's memory tree architecture."
-version: 1.0.0
-author: AI-Writing
+description: "Use when the user wants to turn a folder of local documents into a browsable personal knowledge base / Obsidian wiki. Scans a folder for Word/PDF/Markdown/JSON/CSV/text files, converts them to Markdown, extracts memories (entities, relationships, topics), and outputs an Obsidian-compatible vault with entity cards, wikilinks and hierarchical summaries; supports incremental re-runs and optional parallel processing. Trigger this whenever the user wants to 把资料/文档整理成知识库、建一个 Obsidian wiki/vault、扫描某个文件夹提取知识、把文档变成可检索的记忆/笔记——or points at a local folder of mixed documents and wants it organized or searchable, even if they don't explicitly say 'Obsidian' or 'wiki'. Inspired by OpenHuman's memory tree architecture."
 license: MIT
 metadata:
+  version: 1.0.0
+  author: AI-Writing
   hermes:
     tags: [memory, obsidian, wiki, knowledge-management, documents, local-files]
     related_skills: [flow-any]
