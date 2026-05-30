@@ -35,7 +35,7 @@ metadata:
 |------|--------|----------|
 | **Word** | `.docx` | python-docx 提取段落文本 |
 | **PDF** | `.pdf` | PyMuPDF (fitz) 提取文本 |
-| **Markdown** | `.md` | 直接读取 |
+| **Markdown** | `.md`、`.markdown`、`.mdx` | 直接读取 |
 | **JSON** | `.json` | 递归展开为可读文本 |
 | **CSV** | `.csv` | 解析为 Markdown 表格（首行表头；超大表截断并注明） |
 | **Text** | `.txt`, `.text`, `.log` | 直接读取 |
