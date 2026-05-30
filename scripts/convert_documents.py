@@ -64,8 +64,8 @@ def convert_word(file_path: str) -> str:
             lines.append("| " + " | ".join(["---"] * w) + " |")
             for r in trows[1:]:
                 lines.append("| " + " | ".join(pad(r)) + " |")
-    except Exception:
-        pass
+    except Exception as _table_err:
+        print(f"警告: docx 表格提取失败（段落内容仍保留）: {_table_err}", file=sys.stderr)
 
     return "\n".join(lines)
 

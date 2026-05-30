@@ -198,6 +198,14 @@ def main():
                                                    {"kind": "concept", "text": ".NET"}]}, ensure_ascii=False), encoding="utf-8")
         kept2 = {e["text"] for e in jload_str(run(SC / "verify_entities.py", "--doc", doc2, "--entities", ents2).stdout)["entities"]}
         check("L6 取舍(已知): C++ 不命中 C++11、.NET 不命中 ASP.NET", "C++" not in kept2 and ".NET" not in kept2, str(kept2))
+        # L6 中文场景局限（固化既有行为，旧 \b 亦同）：ASCII 实体紧贴 CJK 时不命中
+        doc3 = W / "ve3.md"; doc3.write_text("AI的应用很广泛，基于RAG的系统已部署。", encoding="utf-8")
+        ents3 = W / "ve3.json"
+        ents3.write_text(json.dumps({"entities": [{"kind": "concept", "text": "AI"},
+                                                   {"kind": "concept", "text": "RAG"}]}, ensure_ascii=False), encoding="utf-8")
+        kept3 = {e["text"] for e in jload_str(run(SC / "verify_entities.py", "--doc", doc3, "--entities", ents3).stdout)["entities"]}
+        check("L6 中文局限(已知): AI/RAG 紧贴汉字时不命中（旧\\b 同行为）",
+              "AI" not in kept3 and "RAG" not in kept3, str(kept3))
 
         # ---------- 6. compute_centrality: F4 degree=不同邻居数 ----------
         print("[6] compute_centrality")
