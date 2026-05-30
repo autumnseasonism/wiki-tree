@@ -111,7 +111,7 @@ tags:
 
 ---
 
-*本索引由 [Local Memory Wiki](https://github.com) Skill 自动生成*
+*本索引由 [Local Memory Wiki](https://github.com/autumnseasonism/local-memory-wiki) Skill 自动生成*
 """
     (vault_path / "_index.md").write_text(index_content, encoding="utf-8")
 
