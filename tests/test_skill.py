@@ -252,6 +252,66 @@ def main():
         r = run(SC / "scan_folder.py", cn, env=clean)
         check("scan stdout 中文文件名无乱码", "照明数据" in r.stdout and r.returncode == 0, (r.stdout or "")[:60])
 
+        # ---------- 9. 补充覆盖：convert_json / CSV 截断 / convert_pdf / 增量 modified / dedup-map ----------
+        print("[9] 补充覆盖")
+        # 9a convert_json 递归渲染
+        cj = W / "cj"; cj.mkdir()
+        (cj / "data.json").write_text(json.dumps({"name": "张三", "meta": {"role": "工程师"}}, ensure_ascii=False), encoding="utf-8")
+        repj = W / "cj.json"
+        repj.write_text(json.dumps(report([(str(cj / "data.json"), "json")]), ensure_ascii=False), encoding="utf-8")
+        jv = W / "jv"; run(SC / "convert_documents.py", "--scan-report", repj, "--output", jv)
+        jmd = (jv / "documents/data.md").read_text(encoding="utf-8")
+        check("convert_json: 键值递归渲染", "**name**: 张三" in jmd and "role" in jmd, jmd[:200])
+
+        # 9b CSV 超大表截断 (CSV_ROW_CAP=1000)
+        big = W / "big"; big.mkdir()
+        (big / "big.csv").write_text("\n".join(["col"] + [f"ROW{i:04d}" for i in range(1, 1101)]), encoding="utf-8")
+        repb = W / "big.json"
+        repb.write_text(json.dumps(report([(str(big / "big.csv"), "csv")]), ensure_ascii=False), encoding="utf-8")
+        bv = W / "bv"; run(SC / "convert_documents.py", "--scan-report", repb, "--output", bv)
+        bmd = (bv / "documents/big.md").read_text(encoding="utf-8")
+        check("CSV 截断: 含过大提示(共1100)", "表格过大" in bmd and "1100" in bmd)
+        check("CSV 截断: 保留 ROW0001、丢弃 ROW1100", "ROW0001" in bmd and "ROW1100" not in bmd)
+
+        # 9c convert_pdf（PyMuPDF 可用时实测，否则跳过）
+        try:
+            import fitz as _fitz
+            _have_pdf = True
+        except ImportError:
+            _have_pdf = False
+        if not _have_pdf:
+            print("  SKIP convert_pdf 测试（PyMuPDF 未安装）")
+        else:
+            pd = W / "pd"; pd.mkdir(); pdfp = pd / "doc.pdf"
+            _pdoc = _fitz.open()
+            _pdoc.new_page().insert_text((72, 72), "PDF page one text")
+            _pdoc.save(str(pdfp)); _pdoc.close()
+            repp = W / "pd.json"
+            repp.write_text(json.dumps(report([(str(pdfp), "pdf")]), ensure_ascii=False), encoding="utf-8")
+            pv = W / "pv"; run(SC / "convert_documents.py", "--scan-report", repp, "--output", pv)
+            pmd = (pv / "documents/doc.md").read_text(encoding="utf-8") if (pv / "documents/doc.md").exists() else ""
+            check("convert_pdf: 页码标注 + 文本", "<!-- 第 1 页 -->" in pmd and "PDF page one text" in pmd, pmd[:200])
+
+        # 9d 增量 modified：源 mtime 变化 → 重新待处理
+        ms = W / "ms"; ms.mkdir(); (ms / "x.md").write_text("内容X", encoding="utf-8")
+        mvt = W / "mvt"; run(SC / "generate_wiki_structure.py", "--output", mvt)
+        run(SC / "scan_folder.py", ms, "-o", mvt / ".memory-wiki/scan.json")
+        run(SC / "update_manifest.py", "--vault", mvt, "--mark", str(ms / "x.md"), "--doc-md", "documents/x.md")
+        run(SC / "scan_folder.py", ms, "--vault", mvt, "-o", mvt / ".memory-wiki/s1.json")
+        check("增量: 未改动 → done(pending 0)", jload(mvt / ".memory-wiki/s1.json")["pending_count"] == 0)
+        os.utime(ms / "x.md", (1_700_000_000, 1_700_000_000))  # 强制改 mtime
+        run(SC / "scan_folder.py", ms, "--vault", mvt, "-o", mvt / ".memory-wiki/s2.json")
+        s2 = jload(mvt / ".memory-wiki/s2.json")
+        st = {Path(f["path"]).name: f["status"] for f in s2["files"]}
+        check("增量: mtime 变化 → modified(重新 pending)", st.get("x.md") == "modified" and s2["pending_count"] == 1, str(st))
+
+        # 9e compute_centrality --dedup-map：变体合并
+        dmp = W / "dmap.json"; dmp.write_text(json.dumps({"C": "B"}, ensure_ascii=False), encoding="utf-8")
+        co_dm = jload_str(run(SC / "compute_centrality.py", "--vault", cev, "--dedup-map", dmp, "-o", W / "cen_dm.json").stdout
+                          and (W / "cen_dm.json").read_text(encoding="utf-8"))
+        ents_dm = {r["entity"] for r in co_dm["top"]}
+        check("dedup-map: C 合并入 B（C 消失、dedup_applied）", "C" not in ents_dm and co_dm["dedup_applied"] is True, str(ents_dm))
+
         print("\n" + "=" * 40)
         print("ALL PASS [OK]" if not fails else f"FAILED ({len(fails)}): {fails}")
         return 1 if fails else 0

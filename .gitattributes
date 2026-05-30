@@ -1,0 +1,5 @@
+# 文本文件统一用 LF 行尾（跨平台一致，消除 Windows 上的 CRLF 警告）
+* text=auto eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
