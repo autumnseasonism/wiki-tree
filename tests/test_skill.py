@@ -253,7 +253,7 @@ def main():
         check("scan stdout 中文文件名无乱码", "照明数据" in r.stdout and r.returncode == 0, (r.stdout or "")[:60])
 
         print("\n" + "=" * 40)
-        print("ALL PASS ✅" if not fails else f"FAILED ({len(fails)}): {fails}")
+        print("ALL PASS [OK]" if not fails else f"FAILED ({len(fails)}): {fails}")
         return 1 if fails else 0
     finally:
         shutil.rmtree(W, ignore_errors=True)
