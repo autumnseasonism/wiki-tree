@@ -182,7 +182,7 @@ python scripts/scan_folder.py {目标路径} --vault {vault} -o {vault}/.memory-
    ```
    python scripts/compute_centrality.py --vault {vault} --dedup-map {vault}/.memory-wiki/_dedup-map.json --top 10 -o {vault}/.memory-wiki/centrality.json
    ```
-   它读 `extracted/*.json` 全集，按 **degree（关系度数）为主、neighbors / doc_count 兜底** 给实体排名，输出 `degree / neighbors / doc_count` 三项信号。**去重是语义活交 LLM、计数是确定性活交脚本**；若跳过第 1 步去重，则省略 `--dedup-map`，按原始实体名统计。
+   它读 `extracted/*.json` 全集，按 **degree（不同邻居数）为主、relation_count（关系边条数）/ doc_count 兜底** 给实体排名，输出 `degree / relation_count / doc_count` 三项信号。**去重是语义活交 LLM、计数是确定性活交脚本**；若跳过第 1 步去重，则省略 `--dedup-map`，按原始实体名统计。
 4. **生成实体卡片**：为中心度 Top 的核心实体各出一张 Markdown 卡片（核心实体清单也回填 `_index.md`）。
 
 ### Phase 6：层级摘要（借鉴 Bucket-Seal）
