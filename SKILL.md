@@ -5,6 +5,7 @@ license: MIT
 metadata:
   version: 1.0.0
   author: AI-Writing
+  # 可选扩展：仅 Hermes 生态读取（tags 做发现、related_skills 做关联）；Anthropic / Claude Code 等其他运行时忽略，删除不影响功能。
   hermes:
     tags: [memory, obsidian, wiki, knowledge-management, documents, local-files]
     related_skills: [flow-any]

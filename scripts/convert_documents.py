@@ -215,7 +215,9 @@ def _existing_is_same_source(md_path: Path, source_path: str) -> bool:
         head = md_path.read_text(encoding="utf-8")[:800]
     except (OSError, UnicodeDecodeError):
         return False
-    return f"source_path: {source_path}" in head
+    # 整行匹配（带行尾 \n），避免"查询路径恰为已存路径的行前缀"的假阳性
+    # （如 /a/report 误命中存有 /a/report.docx 的卡片）
+    return f"source_path: {source_path}\n" in head
 
 
 def process_file(file_info: dict, output_dir: Path, content_hashes: dict = None) -> dict:
