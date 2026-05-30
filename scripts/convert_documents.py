@@ -46,18 +46,20 @@ def convert_word(file_path: str) -> str:
         else:
             lines.append(text)
 
-    # 表格：追加在段落之后（防御性——失败不影响段落提取）
+    # 表格：追加在段落之后（防御性——失败不影响段落提取）；序号按实际渲染的表连续编号（跳过空表不留空号）
     try:
-        for ti, table in enumerate(doc.tables):
+        tn = 0
+        for table in doc.tables:
             trows = [[(c.text or "").strip().replace("|", "\\|") for c in row.cells]
                      for row in table.rows]
             trows = [r for r in trows if any(r)]
             if not trows:
                 continue
+            tn += 1
             w = max(len(r) for r in trows)
             pad = lambda r: r + [""] * (w - len(r))
             lines.append("")
-            lines.append(f"<!-- 表格 {ti + 1} -->")
+            lines.append(f"<!-- 表格 {tn} -->")
             lines.append("| " + " | ".join(pad(trows[0])) + " |")
             lines.append("| " + " | ".join(["---"] * w) + " |")
             for r in trows[1:]:

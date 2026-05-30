@@ -58,8 +58,9 @@ def load_manifest(vault: Path) -> dict:
         with open(mpath, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        # 非破坏性：先把损坏的 manifest 备份到 .corrupt，再重置（原 done 状态可从备份人工恢复）
-        backup = mpath.with_suffix(".json.corrupt")
+        # 非破坏性：把损坏的 manifest 备份到带时间戳的副本（连续损坏不互相覆盖），再重置
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+        backup = mpath.with_name(f"manifest.corrupt-{ts}.json")
         try:
             import shutil
             shutil.copy2(mpath, backup)

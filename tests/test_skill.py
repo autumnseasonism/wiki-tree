@@ -133,6 +133,10 @@ def main():
             _t = _d.add_table(rows=2, cols=2)
             _t.rows[0].cells[0].text = "姓名"; _t.rows[0].cells[1].text = "年龄"
             _t.rows[1].cells[0].text = "张三"; _t.rows[1].cells[1].text = "30"
+            _d.add_table(rows=2, cols=2)  # 全空表 → 应被跳过且不占序号
+            _t3 = _d.add_table(rows=2, cols=2)
+            _t3.rows[0].cells[0].text = "项目"; _t3.rows[0].cells[1].text = "值"
+            _t3.rows[1].cells[0].text = "备注"; _t3.rows[1].cells[1].text = "x|y"
             _d.save(str(docp))
             repd = W / "dd.json"
             repd.write_text(json.dumps(report([(str(docp), "word")]), ensure_ascii=False), encoding="utf-8")
@@ -142,7 +146,9 @@ def main():
             md = (dv / "documents/real.md").read_text(encoding="utf-8") if (dv / "documents/real.md").exists() else ""
             check("M1: 有效 docx 转换成功", st == "success", st)
             check("docx 段落保留", "正文段落内容" in md)
-            check("L8: docx 表格渲染为 Markdown 表格", "| 姓名 | 年龄 |" in md and "| 张三 | 30 |" in md, md[:200])
+            check("L8: 表格渲染为 Markdown 表格", "| 姓名 | 年龄 |" in md and "| 张三 | 30 |" in md, md[:300])
+            check("L8: 单元格竖线转义", "x\\|y" in md, md[:300])
+            check("L8: 空表跳过 + 序号连续", "<!-- 表格 1 -->" in md and "<!-- 表格 2 -->" in md and "<!-- 表格 3 -->" not in md, md[:400])
 
         # ---------- 4. update_manifest ----------
         print("[4] update_manifest")
@@ -156,6 +162,19 @@ def main():
         man = jload(mv / ".memory-wiki/manifest.json")
         check("mark-from 登记 2 且 status=done",
               len(man["processed"]) == 2 and all(x["status"] == "done" for x in man["processed"].values()))
+
+        # L4: 损坏 manifest → 非破坏性（带时间戳备份，连续损坏不互相覆盖）
+        bad = W / "badv"; (bad / ".memory-wiki").mkdir(parents=True)
+        (bad / ".memory-wiki/manifest.json").write_text("{ 这不是合法 json", encoding="utf-8")
+        run(SC / "update_manifest.py", "--vault", bad, "--mark", str(cs / "m.md"), "--doc-md", "documents/m.md")
+        bk = list((bad / ".memory-wiki").glob("manifest.corrupt-*.json"))
+        check("L4: 损坏 manifest 已备份(非破坏)", len(bk) == 1, [b.name for b in bk])
+        check("L4: 备份保留损坏内容", bool(bk) and "这不是合法 json" in bk[0].read_text(encoding="utf-8"))
+        check("L4: 重置后新 mark 写入成功", len(jload(bad / ".memory-wiki/manifest.json")["processed"]) == 1)
+        (bad / ".memory-wiki/manifest.json").write_text("{ 再次损坏", encoding="utf-8")
+        run(SC / "update_manifest.py", "--vault", bad, "--mark", str(cs / "dupA.txt"), "--doc-md", "documents/dupA.md")
+        check("L4: 连续损坏产生 2 个独立备份",
+              len(list((bad / ".memory-wiki").glob("manifest.corrupt-*.json"))) == 2)
 
         # ---------- 5. verify_entities: L6 词边界 ----------
         print("[5] verify_entities")
