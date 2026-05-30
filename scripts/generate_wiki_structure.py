@@ -29,6 +29,9 @@ def create_obsidian_config(vault_path: Path):
             {"query": "tag:#concept", "color": {"a": 1, "rgb": 3447003}},
             {"query": "tag:#tool", "color": {"a": 1, "rgb": 16776960}},
             {"query": "tag:#organization", "color": {"a": 1, "rgb": 16744448}},
+            {"query": "tag:#date", "color": {"a": 1, "rgb": 5763719}},
+            {"query": "tag:#location", "color": {"a": 1, "rgb": 12603469}},
+            {"query": "tag:#event", "color": {"a": 1, "rgb": 15105570}},
             {"query": "tag:#summary", "color": {"a": 1, "rgb": 8421504}},
         ]
     }

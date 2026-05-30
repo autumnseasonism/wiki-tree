@@ -42,6 +42,7 @@ def load_manifest(vault):
         with open(mpath, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        print(f"警告: manifest 损坏或不可读，本次按全新处理（不跳过任何文件）: {mpath}", file=sys.stderr)
         return {}
     if isinstance(data, dict) and isinstance(data.get("processed"), dict):
         return data["processed"]
@@ -97,10 +98,15 @@ def scan_folder(target_path, vault=None):
 
             if ext in SUPPORTED_EXTENSIONS:
                 category = SUPPORTED_EXTENSIONS[ext]
+                # 单次 stat 且容错：避免双重 stat，且存在但 stat 失败(权限等)不致整体崩溃
                 try:
-                    size = fpath.stat().st_size
+                    st = fpath.stat()
+                    size = st.st_size
+                    modified_at = datetime.fromtimestamp(
+                        st.st_mtime, tz=timezone.utc).isoformat()
                 except OSError:
                     size = 0
+                    modified_at = None
 
                 file_info = {
                     "path": str(fpath),
@@ -108,9 +114,7 @@ def scan_folder(target_path, vault=None):
                     "extension": ext,
                     "category": category,
                     "size_bytes": size,
-                    "modified_at": datetime.fromtimestamp(
-                        fpath.stat().st_mtime, tz=timezone.utc
-                    ).isoformat() if fpath.exists() else None,
+                    "modified_at": modified_at,
                 }
 
                 # 增量状态：与 manifest 比对（manifest 只记录已抽取完成 = done 的源）
@@ -174,11 +178,14 @@ def scan_folder(target_path, vault=None):
             "batch_size": 20,
             "deferred_count": total - 100,
         }
-        # 按修改时间排序，最新的在前
+        # 按修改时间排序、最新在前，并**截断到 100**（强制执行上限）：本轮只处理这 100 个；
+        # 其余 deferred_count 个不进入 files → 不会被转换/抽取/登记 → 下一轮 --vault 增量扫描时
+        # 仍是 new，会被自动补上。不再依赖调用方传 --limit。
         results["files"].sort(
             key=lambda f: f.get("modified_at", "") or "",
             reverse=True
         )
+        results["files"] = results["files"][:100]
 
     return results
 
