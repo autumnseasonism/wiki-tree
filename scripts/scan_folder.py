@@ -8,6 +8,7 @@ import os
 import sys
 import json
 import argparse
+import fnmatch
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -49,12 +50,41 @@ def load_manifest(vault):
     return {}
 
 
-def scan_folder(target_path, vault=None):
+def load_ignore_file(target: Path):
+    """读取目标根目录下的 .mwignore（每行一个 glob，# 注释，空行忽略）。"""
+    patterns = []
+    ig = target / ".mwignore"
+    if ig.exists():
+        try:
+            for line in ig.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    patterns.append(line)
+        except (OSError, UnicodeDecodeError):
+            print(f"警告: .mwignore 读取失败，已忽略: {ig}", file=sys.stderr)
+    return patterns
+
+
+def _is_excluded(rel_posix: str, name: str, patterns) -> bool:
+    """rel_posix=相对 target 的 posix 路径；name=basename。任一 glob 命中即排除。
+    支持目录式 'foo/'（匹配该目录本身及其下全部）与普通 glob（*.md、sub/*.csv 等）。"""
+    for pat in patterns:
+        p = pat.rstrip("/")
+        if (fnmatch.fnmatch(rel_posix, pat) or fnmatch.fnmatch(rel_posix, p)
+                or fnmatch.fnmatch(name, pat) or fnmatch.fnmatch(name, p)
+                or fnmatch.fnmatch(rel_posix, p + "/*")):
+            return True
+    return False
+
+
+def scan_folder(target_path, vault=None, exclude=None):
     """递归扫描文件夹，返回分类统计。
 
     vault 非空时进入增量模式：读取 vault/.memory-wiki/manifest.json，为每个文件
     标记 new/modified/done，处理计划只覆盖待处理（new+modified）集，已完成的跳过。
     被 >100 推迟的文件不会被写入 manifest，因此下一轮仍是 new，会被自动补上。
+
+    exclude：glob 列表，命中的文件/目录跳过；另会读取 target/.mwignore 合并进排除集。
     """
     target = Path(target_path).resolve()
     if not target.exists():
@@ -62,6 +92,7 @@ def scan_folder(target_path, vault=None):
     if not target.is_dir():
         return {"error": f"不是目录: {target_path}"}
 
+    patterns = list(exclude or []) + load_ignore_file(target)
     manifest = load_manifest(vault)
     # 归一化路径（大小写/分隔符）以可靠匹配 manifest 键与扫描到的文件
     manifest_norm = {os.path.normcase(k): v for k, v in manifest.items()}
@@ -75,6 +106,8 @@ def scan_folder(target_path, vault=None):
         "categories": {},
         "files": [],
         "unsupported_extensions": set(),
+        "excluded_count": 0,
+        "exclude_patterns": patterns,
     }
 
     for category in set(SUPPORTED_EXTENSIONS.values()):
@@ -85,15 +118,24 @@ def scan_folder(target_path, vault=None):
         }
 
     for root, dirs, files in os.walk(target):
+        rootp = Path(root)
         # 跳过隐藏目录和常见的非文档目录
         dirs[:] = [d for d in dirs if not d.startswith('.') and d not in {
             'node_modules', '__pycache__', '.git', 'venv', '.venv',
             'target', 'build', 'dist', '.obsidian'
         }]
+        # 用户 exclude / .mwignore：命中的目录剪枝（不再深入遍历）
+        if patterns:
+            dirs[:] = [d for d in dirs if not _is_excluded(
+                (rootp / d).relative_to(target).as_posix(), d, patterns)]
 
         for fname in files:
+            fpath = rootp / fname
+            # 用户 exclude / .mwignore：命中的文件直接跳过（不计入任何计数）
+            if patterns and _is_excluded(fpath.relative_to(target).as_posix(), fname, patterns):
+                results["excluded_count"] += 1
+                continue
             results["total_files"] += 1
-            fpath = Path(root) / fname
             ext = fpath.suffix.lower()
 
             if ext in SUPPORTED_EXTENSIONS:
@@ -210,9 +252,12 @@ def main():
     parser.add_argument("--output", "-o", help="输出 JSON 报告路径（默认 stdout）")
     parser.add_argument("--vault", help="已有 Vault 路径；提供则进入增量模式"
                                         "（读取 .memory-wiki/manifest.json，跳过已处理文档）")
+    parser.add_argument("--exclude", action="append", default=[],
+                        help="排除匹配该 glob 的文件/目录（可多次指定）；"
+                             "目标根目录的 .mwignore 也会被读取并合并")
     args = parser.parse_args()
 
-    results = scan_folder(args.path, vault=args.vault)
+    results = scan_folder(args.path, vault=args.vault, exclude=args.exclude)
 
     if "error" in results:
         print(f"错误: {results['error']}", file=sys.stderr)

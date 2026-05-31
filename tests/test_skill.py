@@ -312,6 +312,110 @@ def main():
         ents_dm = {r["entity"] for r in co_dm["top"]}
         check("dedup-map: C 合并入 B（C 消失、dedup_applied）", "C" not in ents_dm and co_dm["dedup_applied"] is True, str(ents_dm))
 
+        # ---------- 10. scan --exclude / .mwignore（防止递归吞掉嵌套项目）----------
+        print("[10] scan exclude/.mwignore")
+        ex = W / "ex"; (ex / "nested").mkdir(parents=True); (ex / "sub").mkdir()
+        (ex / "a.md").write_text("# A", encoding="utf-8")
+        (ex / "sub" / "b.md").write_text("# B", encoding="utf-8")
+        (ex / "nested" / "skill.md").write_text("# nested", encoding="utf-8")
+        run(SC / "scan_folder.py", ex, "--exclude", "nested", "-o", W / "ex1.json")
+        names1 = {f["name"] for f in jload(W / "ex1.json")["files"]}
+        check("exclude 目录: nested/ 被剪枝", "skill.md" not in names1 and {"a.md", "b.md"} <= names1, str(names1))
+        run(SC / "scan_folder.py", ex, "--exclude", "skill.md", "-o", W / "ex2.json")
+        e2 = jload(W / "ex2.json")
+        check("exclude 文件名: skill.md 跳过 + excluded_count>=1",
+              "skill.md" not in {f["name"] for f in e2["files"]} and e2["excluded_count"] >= 1, e2.get("excluded_count"))
+        (ex / ".mwignore").write_text("# 注释\nnested/\n", encoding="utf-8")
+        run(SC / "scan_folder.py", ex, "-o", W / "ex3.json")
+        check(".mwignore: nested/ 被排除", "skill.md" not in {f["name"] for f in jload(W / "ex3.json")["files"]})
+
+        # ---------- 11. convert: 源 .md front-matter 降级（消除双 front-matter）----------
+        print("[11] convert front-matter 降级")
+        fmd = W / "fmd"; fmd.mkdir()
+        (fmd / "withfm.md").write_text("---\nname: lighting-x\ntags:\n  - t1\n---\n\n# 标题\n正文 lighting-x 提及。", encoding="utf-8")
+        (fmd / "plain.md").write_text("# 无fm\n正文", encoding="utf-8")
+        repfm = W / "fmd.json"
+        repfm.write_text(json.dumps(report([(str(fmd / "withfm.md"), "markdown"), (str(fmd / "plain.md"), "markdown")]), ensure_ascii=False), encoding="utf-8")
+        fmv = W / "fmv"; run(SC / "convert_documents.py", "--scan-report", repfm, "--output", fmv)
+        wmd = (fmv / "documents/withfm.md").read_text(encoding="utf-8")
+        ndash = sum(1 for ln in wmd.splitlines() if ln.strip() == "---")
+        check("front-matter 降级: 全文只剩一对 YAML 头（无双 fm）", ndash == 2, ndash)
+        check("front-matter 降级: 源 fm 降级为引用块", "> name: lighting-x" in wmd)
+        check("front-matter 降级: 源 fm 不再是裸 YAML 行", "\nname: lighting-x" not in wmd)
+        check("front-matter 降级: 实体仍在正文可匹配", "lighting-x 提及" in wmd)
+        check("无 fm 的 .md 不受影响", "# 无fm" in (fmv / "documents/plain.md").read_text(encoding="utf-8"))
+
+        # ---------- 12. update_manifest --from-conversion-report + --clean-marks ----------
+        print("[12] update_manifest --from-conversion-report")
+        crv = W / "crv"; run(SC / "generate_wiki_structure.py", "--output", crv)
+        fake_cr = {"details": [
+            {"status": "success", "source": str(cs / "m.md"), "output": str(crv / "documents/m.md")},
+            {"status": "skipped", "source": str(cs / "dupB.txt"), "duplicate_of": str(crv / "documents/dupA.md")},
+            {"status": "error", "source": str(cs / "fake.docx"), "reason": "x"},
+        ]}
+        crj = W / "fake_cr.json"; crj.write_text(json.dumps(fake_cr, ensure_ascii=False), encoding="utf-8")
+        run(SC / "update_manifest.py", "--vault", crv, "--from-conversion-report", crj)
+        cman = jload(crv / ".memory-wiki/manifest.json")["processed"]
+        check("from-conversion-report: success+去重副本各登记(2)、error 不登记", len(cman) == 2, len(cman))
+        dup_rec = cman.get(str(Path(str(cs / "dupB.txt")).resolve()))
+        check("from-conversion-report: 副本 doc_md 指向 canonical",
+              bool(dup_rec) and dup_rec["doc_md"] == "documents/dupA.md", dup_rec)
+        cmv = W / "cmv"; run(SC / "generate_wiki_structure.py", "--output", cmv)
+        marks_f = W / "marks_clean.json"
+        marks_f.write_text(json.dumps([{"source_path": str(cs / "m.md"), "doc_md": "documents/m.md", "doc_id": "m"}], ensure_ascii=False), encoding="utf-8")
+        run(SC / "update_manifest.py", "--vault", cmv, "--mark-from", marks_f, "--clean-marks")
+        check("--clean-marks: 清单文件被删除", not marks_f.exists())
+        check("--clean-marks: 仍正确登记", len(jload(cmv / ".memory-wiki/manifest.json")["processed"]) == 1)
+
+        # ---------- 13. assemble_vault: 统计回填 + 卡片骨架 + 零悬空 + create-if-missing ----------
+        print("[13] assemble_vault")
+        av = W / "av"; run(SC / "generate_wiki_structure.py", "--output", av)
+        (av / "documents/doc1.md").write_text("# doc1\n项目P 工具T 概念C", encoding="utf-8")
+        (av / "documents/doc2.md").write_text("# doc2\n工具T 概念C", encoding="utf-8")
+        exd = av / ".memory-wiki/extracted"
+        (exd / "doc1.json").write_text(json.dumps({
+            "doc_id": "doc1", "doc_md": "documents/doc1.md", "short_summary": "文档一概要", "importance": 0.9,
+            "topics": ["主题甲"],
+            "entities": [{"kind": "project", "text": "项目P"}, {"kind": "tool", "text": "工具T"}, {"kind": "concept", "text": "概念C"}],
+            "relations": [{"subject": "项目P", "predicate": "USES", "object": "工具T", "confidence": 0.9, "evidence": "P 用 T"},
+                          {"subject": "项目P", "predicate": "USES", "object": "概念C", "confidence": 0.8}]}, ensure_ascii=False), encoding="utf-8")
+        (exd / "doc2.json").write_text(json.dumps({
+            "doc_id": "doc2", "doc_md": "documents/doc2.md", "short_summary": "文档二概要", "importance": 0.5,
+            "topics": ["主题甲"],
+            "entities": [{"kind": "tool", "text": "工具T"}, {"kind": "concept", "text": "概念C"}],
+            "relations": [{"subject": "工具T", "predicate": "RELATED_TO", "object": "概念C", "confidence": 0.7}]}, ensure_ascii=False), encoding="utf-8")
+        asum = jload_str(run(SC / "assemble_vault.py", "--vault", av).stdout)
+        check("assemble: 文档/实体/关系计数", asum["docs"] == 2 and asum["entities"] == 3 and asum["relations"] == 3, asum)
+        check("assemble: 生成 index/graph/report",
+              (av / "_index.md").exists() and (av / "relations/_knowledge-graph.md").exists() and (av / "_processing-report.md").exists())
+        check("assemble: _index 统计回填", "文档总数**：2" in (av / "_index.md").read_text(encoding="utf-8"))
+        check("assemble: 卡片建给连通实体(degree>=1)", asum["cards_created"] >= 3, asum["cards_created"])
+        notes = {p.stem for p in av.rglob("*.md") if ".memory-wiki" not in p.parts}
+        dangling = []
+        for p in av.rglob("*.md"):
+            if ".memory-wiki" in p.parts:
+                continue
+            for m in re.finditer(r"\[\[([^\]]+)\]\]", p.read_text(encoding="utf-8")):
+                tgt = m.group(1).split("|")[0].split("#")[0].strip().split("/")[-1]
+                if tgt not in notes:
+                    dangling.append((p.name, tgt))
+        check("assemble: 零悬空 wikilink", not dangling, str(dangling[:5]))
+        ra2 = jload_str(run(SC / "assemble_vault.py", "--vault", av).stdout)
+        check("assemble: 再跑 create-if-missing（卡片 skip 不覆盖）", ra2["cards_created"] == 0 and ra2["cards_skipped"] >= 3, ra2)
+        rep_txt = (av / "_processing-report.md").read_text(encoding="utf-8")
+        check("assemble: importance 被消费（doc1=0.9 排在 doc2=0.5 前）", rep_txt.index("doc1") < rep_txt.index("doc2"))
+
+        # ---------- 14. suggest_dedup: 候选变体挖掘 ----------
+        print("[14] suggest_dedup")
+        sv = W / "sv"; (sv / ".memory-wiki/extracted").mkdir(parents=True)
+        (sv / ".memory-wiki/extracted/d.json").write_text(json.dumps({"doc_id": "d",
+            "entities": [{"kind": "tool", "text": "Chart.js"}, {"kind": "tool", "text": "chartjs"},
+                         {"kind": "concept", "text": "RAG"}, {"kind": "concept", "text": "RAG系统"}]}, ensure_ascii=False), encoding="utf-8")
+        sd = jload_str(run(SC / "suggest_dedup.py", "--vault", sv).stdout)
+        pairs = {tuple(sorted(c["variants"])) for c in sd["candidates"]}
+        check("suggest_dedup: 归一化相等候选(Chart.js/chartjs)", tuple(sorted(("Chart.js", "chartjs"))) in pairs, str(pairs))
+        check("suggest_dedup: 子串候选(RAG/RAG系统)", any("RAG" in p and "RAG系统" in p for p in pairs), str(pairs))
+
         print("\n" + "=" * 40)
         print("ALL PASS [OK]" if not fails else f"FAILED ({len(fails)}): {fails}")
         return 1 if fails else 0

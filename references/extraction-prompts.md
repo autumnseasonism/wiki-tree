@@ -51,6 +51,8 @@
 }
 ```
 
+> **`importance` 的用途**：会被 `scripts/assemble_vault.py` 消费——`_index.md` 的"最近处理"与 `_processing-report.md` 的文档表均按 `importance` 降序排列，让高价值文档靠前。请如实评分，它不是可丢弃的装饰字段。
+
 ---
 
 ## 2. 摘要生成提示词

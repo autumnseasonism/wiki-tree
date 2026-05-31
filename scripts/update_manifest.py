@@ -112,6 +112,34 @@ def mark_one(data: dict, source_path: str, doc_md: str = None,
     }
 
 
+def mark_from_conversion_report(data: dict, report_path: str) -> int:
+    """从 convert_documents.py 的 _conversion_report.json 自动登记，免去人肉记账：
+    - status=success：登记源文件，doc_md 指向其自身输出。
+    - status=skipped 且带 duplicate_of（内容去重副本）：登记源文件，doc_md 指向其 canonical
+      文档——否则下一轮增量扫描会把这些副本当 new 重新转换（去重只在单次运行内生效）。
+    其余（error / 无 duplicate_of 的 skipped）不登记。返回登记条数。
+    """
+    with open(report_path, "r", encoding="utf-8") as f:
+        rep = json.load(f)
+    n = 0
+    for d in rep.get("details", []):
+        if not isinstance(d, dict):
+            continue
+        src = d.get("source")
+        if not src:
+            continue
+        st = d.get("status")
+        if st == "success" and d.get("output"):
+            mark_one(data, src, "documents/" + Path(d["output"]).name)
+            n += 1
+        elif st == "skipped" and d.get("duplicate_of"):
+            canon = d["duplicate_of"]
+            mark_one(data, src, "documents/" + Path(canon).name,
+                     doc_id=Path(canon).stem)
+            n += 1
+    return n
+
+
 def main():
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -125,6 +153,11 @@ def main():
     parser.add_argument("--doc-id", help="extracted/<doc-id>.json 用的 id（默认取 doc-md 的文件名）")
     parser.add_argument("--mtime", help="源文件 mtime（ISO）；默认自动 stat 源文件")
     parser.add_argument("--mark-from", help="批量标记：指向一个 JSON 数组文件")
+    parser.add_argument("--from-conversion-report",
+                        help="从 convert_documents.py 的 _conversion_report.json 自动登记："
+                             "success 标记自身、内容去重 skipped 标记指向其 canonical")
+    parser.add_argument("--clean-marks", action="store_true",
+                        help="成功写入后删除 --mark-from 指向的临时清单文件")
     args = parser.parse_args()
 
     vault = Path(args.vault)
@@ -132,6 +165,8 @@ def main():
     data = load_manifest(vault)
 
     marked = 0
+    if args.from_conversion_report:
+        marked += mark_from_conversion_report(data, args.from_conversion_report)
     if args.mark_from:
         with open(args.mark_from, "r", encoding="utf-8") as f:
             items = json.load(f)
@@ -144,6 +179,12 @@ def main():
         marked += 1
 
     _write_manifest(vault, data)
+
+    if args.clean_marks and args.mark_from:
+        try:
+            Path(args.mark_from).unlink()
+        except OSError:
+            pass
 
     print(json.dumps({
         "vault": str(vault),

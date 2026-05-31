@@ -220,6 +220,32 @@ def _existing_is_same_source(md_path: Path, source_path: str) -> bool:
     return f"source_path: {source_path}\n" in head
 
 
+def _demote_md_frontmatter(text: str) -> str:
+    """源 .md 若以 YAML front-matter 开头，将其降级为正文顶部的引用块。
+
+    转换器会在每篇输出顶部注入自己的 front-matter；若源文件本身也有 front-matter，
+    旧行为是直接拼在其下 → 形成"双 front-matter"，第二段会被当成正文泄漏（且
+    verify_entities 只剥第一段）。这里把源 front-matter 降级为带标注的引用块：
+    既不再有第二个 YAML 头，内容也仍以正文形式保留、可被实体校验匹配到。
+    纯行级处理，不依赖 pyyaml；未检测到 front-matter 时原样返回。
+    """
+    if not text.startswith("---"):
+        return text
+    lines = text.splitlines(keepends=True)
+    if lines[0].strip() != "---":
+        return text
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            fm = [ln.rstrip("\n") for ln in lines[1:i] if ln.strip()]
+            body = "".join(lines[i + 1:]).lstrip("\n")
+            if not fm:
+                return body
+            quoted = "\n".join("> " + ln for ln in fm)
+            return ("<!-- 源文档 front-matter（已降级为引用，避免双 front-matter）-->\n"
+                    + quoted + "\n\n" + body)
+    return text  # 未闭合的 ---，不当 front-matter 处理
+
+
 def process_file(file_info: dict, output_dir: Path, content_hashes: dict = None) -> dict:
     """处理单个文件，返回结果信息。
 
@@ -247,6 +273,9 @@ def process_file(file_info: dict, output_dir: Path, content_hashes: dict = None)
                 content = Path(source_path).read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 content = Path(source_path).read_text(encoding="gbk")
+            # 源 .md 若自带 front-matter，降级为正文引用块，避免与下方注入的
+            # front-matter 形成"双 front-matter"（第二段会泄漏进正文）
+            content = _demote_md_frontmatter(content)
         else:
             converter = CONVERTERS.get(category)
             if not converter:
