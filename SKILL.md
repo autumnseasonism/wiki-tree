@@ -337,7 +337,7 @@ created_at: 2026-05-19T14:30:00Z
    python scripts/emit_access_bundle.py --vault {vault} \
      --id {kebab-id} --name "{库名}" --scope "{一句话：这库是什么、覆盖什么}"
    ```
-   产出 `{vault}/kb.json`、`AGENTS.md`、`.mcp.json`；`use_when`（触发词）自动取自中心度 Top 实体。
+   产出 `{vault}/kb.json`、`AGENTS.md`、`.mcp.json`；`use_when`（触发词）自动派生自中心度 Top 实体 + 主要主题名（可加 `--extra-use-when "词1,词2"` 补充领域词）。
 3. **全局注册**（跨项目可发现）：
    ```bash
    python scripts/kb_register.py --vault {vault} [--install-hook]

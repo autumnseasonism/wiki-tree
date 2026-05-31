@@ -97,6 +97,8 @@ def search(q, top=5, level="short"):
 
 
 def get_topic(name):
+    if not (name or "").strip():
+        return "请提供主题名（用 --list-topics 查看全部）"
     for t in KB["topics"]:
         if t["name"] == name or _toks(name) <= _toks(t["name"]):
             p = os.path.join(ROOT, t["summary_file"])
