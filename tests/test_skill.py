@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-memory-wiki 回归测试套件。
+wiki-tree 回归测试套件。
 运行: python tests/test_skill.py   （建议先 set PYTHONUTF8=1 / export PYTHONUTF8=1）
 覆盖 6 个脚本的核心行为 + 历次修复：
   增量(manifest)/并行登记/内容去重/CSV 表格/幻觉闸门/确定性中心度,

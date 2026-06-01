@@ -7,7 +7,7 @@
   --global        topics(下方)    --level detailed     documents/*.md
 
 它只读「同目录的 kb.json + vault 文件」，因此同一份代码放进任何用
-memory-wiki 构建的 vault 都能用。任何能跑 shell 的 agent
+wiki-tree 构建的 vault 都能用。任何能跑 shell 的 agent
 （Claude Code / Codex / OpenClaw / Hermes …）都可直接调用。
 
 用法:

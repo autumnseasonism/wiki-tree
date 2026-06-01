@@ -20,7 +20,7 @@ import json
 import argparse
 from datetime import datetime, timezone
 
-BEGIN = "<!-- KB-HUB:BEGIN auto-managed by memory-wiki -->"
+BEGIN = "<!-- KB-HUB:BEGIN auto-managed by wiki-tree -->"
 END = "<!-- KB-HUB:END -->"
 # 幂等替换只认稳定的起始标签（描述文字可随技能改名而变，匹配不受影响 → 永不产生重复块）
 _BEGIN_TAG = "<!-- KB-HUB:BEGIN"

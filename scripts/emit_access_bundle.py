@@ -166,7 +166,7 @@ def render_agents(kb):
     s = kb["stats"]
     L = [
         "# Knowledge Base: %s" % kb["name"],
-        "<!-- 由 memory-wiki 自动生成；改 kb.json 后用 emit_access_bundle.py 重生成，勿手改 -->",
+        "<!-- 由 wiki-tree 自动生成；改 kb.json 后用 emit_access_bundle.py 重生成，勿手改 -->",
         "",
         "**何时用我**：%s。" % kb["scope"],
         "命中关键词（任一）即应优先查本库：%s 等。" % "、".join(kb["use_when"][:12]),
@@ -195,7 +195,7 @@ def main():
     ap.add_argument("--vault", required=True)
     ap.add_argument("--id", default="kb")
     ap.add_argument("--name", default="本地知识库")
-    ap.add_argument("--scope", default="由 memory-wiki 构建的本地知识库")
+    ap.add_argument("--scope", default="由 wiki-tree 构建的本地知识库")
     ap.add_argument("--extra-use-when", default="",
                     help="额外触发词（逗号分隔），追加到自动派生的 use_when（领域词可在此补充）")
     a = ap.parse_args()
