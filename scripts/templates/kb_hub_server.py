@@ -40,14 +40,18 @@ def _toks(s):
 
 
 def _kbjson(root):
-    return json.load(open(os.path.join(root, "kb.json"), encoding="utf-8"))
+    p = os.path.join(root, "kb.json")
+    if not os.path.exists(p):
+        raise FileNotFoundError(
+            "未找到 kb.json（%s）；该库可能未生成接入包，请在该库目录运行 emit_access_bundle.py" % p)
+    return json.load(open(p, encoding="utf-8"))
 
 
 def _search(root, q, top, level):
-    kb = _kbjson(root)
     qt = _toks(q)
     if not qt:
         return {"error": "empty query"}
+    kb = _kbjson(root)
     scored = []
     for t in kb.get("topics", []):
         sc = len(qt & _toks(t["name"] + " " + t.get("one_liner", "")))
@@ -74,6 +78,7 @@ def _search(root, q, top, level):
     docs.sort(key=lambda x: -x[0])
     return {
         "query": q, "level": level,
+        "drilldown": "L1 主题摘要(topics.summary_file) → 逐文档详细摘要(--level detailed) → L0 全文(documents 路径)",
         "topics": [{"name": t["name"], "summary_file": t["summary_file"],
                     "one_liner": t.get("one_liner", "")} for _, t in scored[:3]],
         "documents": [it for _, it in docs[:top]],
