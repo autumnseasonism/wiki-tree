@@ -37,6 +37,11 @@ def _read_one_liner(md_path):
     return ""
 
 
+def _toks(s):
+    """英文按词、中文按字切分（与 kb_query.py 一致），用于预分词检索索引。"""
+    return set(re.findall(r"[a-z0-9]+|[一-鿿]", (s or "").lower()))
+
+
 def build_kb(vault, kid, name, scope, extra_use_when=None):
     mw = os.path.join(vault, ".memory-wiki")
     ext = os.path.join(mw, "extracted")
@@ -49,10 +54,11 @@ def build_kb(vault, kid, name, scope, extra_use_when=None):
     def canon(t):
         return dmap.get(t, t)
 
-    # 关系去重 + 按主题计文档数（主题取 extracted 的 topics，safe 后作为 key）
+    # 单遍扫描 extracted：关系去重 + 按主题计文档数 + 构建预分词检索索引
     docs = glob.glob(os.path.join(ext, "*.json"))
     rels = set()
     topic_count = {}
+    index_docs = []
     for f in docs:
         try:
             d = json.load(open(f, encoding="utf-8"))
@@ -68,6 +74,25 @@ def build_kb(vault, kid, name, scope, extra_use_when=None):
             k = _safe((t or "").strip())
             if k:
                 topic_count[k] = topic_count.get(k, 0) + 1
+        did = d.get("doc_id", os.path.basename(f)[:-5])
+        short = d.get("short_summary", "")
+        detailed = d.get("detailed_summary", "")
+        blob = short + " " + detailed + " " + " ".join(
+            (e.get("text") or "") for e in d.get("entities", []) or [])
+        index_docs.append({
+            "id": did,
+            "md": d.get("doc_md", "documents/%s.md" % did),
+            "imp": d.get("importance", 0) or 0,
+            "short": short,
+            "detailed": detailed,
+            "tok": sorted(_toks(blob)),
+        })
+
+    # 写预分词检索索引：kb_query / kb_hub_server 优先用它（读 1 个文件而非扫 963 个）；
+    # 缺失时它们回退扫 extracted（向后兼容）。
+    json.dump({"version": 1, "docs": index_docs},
+              open(os.path.join(mw, "search-index.json"), "w", encoding="utf-8"),
+              ensure_ascii=False)
 
     # 主题以 summaries/topic-*.md 为准（Phase 6 保证产出）：name/链接用文件名 → 零悬空；
     # 一句话从文件解析；文档数按 safe 后的 topic 匹配。
@@ -121,6 +146,7 @@ def build_kb(vault, kid, name, scope, extra_use_when=None):
             "entities_dir": "entities/",
             "knowledge_graph": "relations/_knowledge-graph.md",
             "extracted_dir": ".memory-wiki/extracted/",
+            "search_index": ".memory-wiki/search-index.json",
         },
         "query": {
             "cli": "python kb_query.py \"{question}\" [--level short|detailed|full] [--json]",

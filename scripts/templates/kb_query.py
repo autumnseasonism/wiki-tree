@@ -57,6 +57,18 @@ def _iter_extracted():
             continue
 
 
+def _load_index():
+    """读预分词检索索引（一次只读 1 个文件）；无则返回 None → 回退扫 extracted。"""
+    rel = KB.get("entrypoints", {}).get("search_index", ".memory-wiki/search-index.json")
+    p = os.path.join(ROOT, rel)
+    if os.path.exists(p):
+        try:
+            return json.load(open(p, encoding="utf-8")).get("docs")
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            return None
+    return None
+
+
 def search(q, top=5, level="short"):
     """分层检索：返回相关主题(L1)摘要路径 + 候选文档；level=detailed 时附逐文档详细摘要。"""
     qt = _toks(q)
@@ -69,21 +81,32 @@ def search(q, top=5, level="short"):
             topics.append((sc, t))
     topics.sort(key=lambda x: -x[0])
     docs = []
-    for d in _iter_extracted():
-        blob = (d.get("short_summary", "") + " " + d.get("detailed_summary", "") + " "
-                + " ".join((e.get("text") or "") for e in d.get("entities", [])))
-        sc = len(qt & _toks(blob))
-        if sc:
-            did = d.get("doc_id", "")
-            item = {
-                "doc_id": did,
-                "path": d.get("doc_md", "documents/%s.md" % did),
-                "importance": d.get("importance", 0) or 0,
-                "short": d.get("short_summary", ""),
-            }
-            if level in ("detailed", "full"):
-                item["detailed"] = d.get("detailed_summary", "")
-            docs.append((sc * (0.5 + item["importance"]), item))
+    idx = _load_index()
+    if idx is not None:
+        for r in idx:
+            sc = len(qt & set(r.get("tok", [])))
+            if sc:
+                item = {"doc_id": r.get("id", ""), "path": r.get("md", ""),
+                        "importance": r.get("imp", 0) or 0, "short": r.get("short", "")}
+                if level in ("detailed", "full"):
+                    item["detailed"] = r.get("detailed", "")
+                docs.append((sc * (0.5 + item["importance"]), item))
+    else:
+        for d in _iter_extracted():
+            blob = (d.get("short_summary", "") + " " + d.get("detailed_summary", "") + " "
+                    + " ".join((e.get("text") or "") for e in d.get("entities", [])))
+            sc = len(qt & _toks(blob))
+            if sc:
+                did = d.get("doc_id", "")
+                item = {
+                    "doc_id": did,
+                    "path": d.get("doc_md", "documents/%s.md" % did),
+                    "importance": d.get("importance", 0) or 0,
+                    "short": d.get("short_summary", ""),
+                }
+                if level in ("detailed", "full"):
+                    item["detailed"] = d.get("detailed_summary", "")
+                docs.append((sc * (0.5 + item["importance"]), item))
     docs.sort(key=lambda x: -x[0])
     return {
         "query": q,

@@ -47,6 +47,26 @@ def _kbjson(root):
     return json.load(open(p, encoding="utf-8"))
 
 
+_IDX_CACHE = {}
+
+
+def _index(root, kb):
+    """加载预分词检索索引并按 root 缓存（常驻进程：首查加载、后续复用）；无则返回 None。"""
+    if root in _IDX_CACHE:
+        return _IDX_CACHE[root]
+    rel = kb.get("entrypoints", {}).get("search_index", ".memory-wiki/search-index.json")
+    p = os.path.join(root, rel)
+    rows = None
+    if os.path.exists(p):
+        try:
+            rows = [(set(r.get("tok", [])), r)
+                    for r in json.load(open(p, encoding="utf-8")).get("docs", [])]
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            rows = None
+    _IDX_CACHE[root] = rows
+    return rows
+
+
 def _search(root, q, top, level):
     qt = _toks(q)
     if not qt:
@@ -58,23 +78,34 @@ def _search(root, q, top, level):
         if sc:
             scored.append((sc, t))
     scored.sort(key=lambda x: -x[0])
-    ext = os.path.join(root, kb["entrypoints"]["extracted_dir"])
     docs = []
-    for f in glob.glob(os.path.join(ext, "*.json")):
-        try:
-            d = json.load(open(f, encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-            continue
-        blob = (d.get("short_summary", "") + " " + d.get("detailed_summary", "") + " "
-                + " ".join((e.get("text") or "") for e in d.get("entities", [])))
-        sc = len(qt & _toks(blob))
-        if sc:
-            did = d.get("doc_id", "")
-            it = {"doc_id": did, "path": d.get("doc_md", "documents/%s.md" % did),
-                  "importance": d.get("importance", 0) or 0, "short": d.get("short_summary", "")}
-            if level in ("detailed", "full"):
-                it["detailed"] = d.get("detailed_summary", "")
-            docs.append((sc * (0.5 + it["importance"]), it))
+    rows = _index(root, kb)
+    if rows is not None:
+        for toks, r in rows:
+            sc = len(qt & toks)
+            if sc:
+                it = {"doc_id": r.get("id", ""), "path": r.get("md", ""),
+                      "importance": r.get("imp", 0) or 0, "short": r.get("short", "")}
+                if level in ("detailed", "full"):
+                    it["detailed"] = r.get("detailed", "")
+                docs.append((sc * (0.5 + it["importance"]), it))
+    else:
+        ext = os.path.join(root, kb["entrypoints"]["extracted_dir"])
+        for f in glob.glob(os.path.join(ext, "*.json")):
+            try:
+                d = json.load(open(f, encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            blob = (d.get("short_summary", "") + " " + d.get("detailed_summary", "") + " "
+                    + " ".join((e.get("text") or "") for e in d.get("entities", [])))
+            sc = len(qt & _toks(blob))
+            if sc:
+                did = d.get("doc_id", "")
+                it = {"doc_id": did, "path": d.get("doc_md", "documents/%s.md" % did),
+                      "importance": d.get("importance", 0) or 0, "short": d.get("short_summary", "")}
+                if level in ("detailed", "full"):
+                    it["detailed"] = d.get("detailed_summary", "")
+                docs.append((sc * (0.5 + it["importance"]), it))
     docs.sort(key=lambda x: -x[0])
     return {
         "query": q, "level": level,
