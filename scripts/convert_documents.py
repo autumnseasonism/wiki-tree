@@ -3,7 +3,8 @@
 convert_documents.py — 将多种格式文档统一转换为 Markdown
 用法: python convert_documents.py --scan-report /path/to/scan.json --output /path/to/output
 
-依赖: pip install python-docx PyMuPDF
+可选依赖（按需，核心 md/txt/json/csv 转换纯标准库）: pip install python-docx  # 仅 .docx
+                                                  pip install PyMuPDF      # 仅 .pdf
 """
 
 import os

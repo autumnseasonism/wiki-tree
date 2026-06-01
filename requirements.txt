@@ -1,0 +1,13 @@
+# wiki-tree — Python dependencies
+#
+# CORE: none. Scanning, Markdown/Text/JSON/CSV conversion, kb_query (CLI search),
+# kb_ingest (ingest router), centrality, vault assembly, and the test suite all
+# run on the Python standard library — ZERO installs required.
+#
+# The packages below are OPTIONAL — each enables ONE feature. Install only what
+# your inputs/usage need, or run `pip install -r requirements.txt` for everything.
+# Tip: `python scripts/check_deps.py` reports which are present/missing.
+
+python-docx   # only to convert .docx (Word) documents
+PyMuPDF       # only to convert .pdf documents
+mcp[cli]      # only to run the MCP servers (kb_hub_server.py / kb_mcp_server.py); CLI querying via kb_query.py does NOT need this

@@ -50,14 +50,16 @@ metadata:
 
 ### Phase 1：环境准备
 
-先看扫描结果里的格式，**按需安装**（纯 Markdown / JSON / Text / CSV 无需任何第三方库）：
+先看扫描结果里的格式，**按需安装**。核心流程（扫描 / Markdown·Text·JSON·CSV 转换 / `kb_query` 查询 / `kb_ingest` 路由 / 中心度 / 装配）**纯标准库，0 安装即可用**；下列为可选依赖，各启用一项功能：
 
 ```bash
-pip install python-docx   # 仅当目标文件夹含 .docx
-pip install PyMuPDF        # 仅当目标文件夹含 .pdf
+pip install python-docx     # 仅当目标文件夹含 .docx
+pip install PyMuPDF          # 仅当目标文件夹含 .pdf
+pip install "mcp[cli]"       # 仅当要把库挂成 MCP 服务（kb_hub_server / kb_mcp_server）；CLI 查询 kb_query.py 不需要
+# 一键装全（含上述全部可选项）：pip install -r requirements.txt
 ```
 
-若不含 Word/PDF，可跳过本步。
+不确定缺什么，先跑 `python scripts/check_deps.py` 自检（纯标准库，报告各可选依赖在/缺 + 缺的装啥）。若不含 Word/PDF 且不挂 MCP，可跳过本步。
 
 ### Phase 2：扫描与评估
 
