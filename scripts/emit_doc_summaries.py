@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """emit_doc_summaries.py — 可选：把每篇文档的「短摘要 + 详细摘要」落成可见的
-   summaries/doc-<id>.md。默认不做——逐文档详细摘要本就存于 .memory-wiki/extracted/，
+   summaries/doc-<id>.md。默认不做——逐文档详细摘要本就存于 .wiki-tree/extracted/，
    kb_query.py --level detailed 即可取用，无需文件。仅当语料是「长文档」且需要在
    Obsidian 里逐篇浏览/双链摘要时才用（短文档语料会让文件数翻倍、收益小）。
 
@@ -23,7 +23,7 @@ def main():
     except (AttributeError, ValueError):
         pass
     vault = os.path.abspath(a.vault)
-    ext = os.path.join(vault, ".memory-wiki", "extracted")
+    ext = os.path.join(vault, ".wiki-tree", "extracted")
     out = os.path.join(vault, "summaries")
     os.makedirs(out, exist_ok=True)
     n = 0

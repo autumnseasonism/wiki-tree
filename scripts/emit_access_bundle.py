@@ -4,8 +4,8 @@
    kb.json（单一真相源）+ AGENTS.md（自描述指令）+ .mcp.json（Claude Code 项目 MCP 注册）。
 kb_query.py / kb_mcp_server.py 是通用代码模板，单独放在 vault 根（不由本脚本生成）。
 
-只依赖 reduce 阶段的标准产物：`.memory-wiki/extracted/*.json`、`.memory-wiki/centrality.json`、
-`summaries/topic-*.md`（Phase 6 产出），可选 `.memory-wiki/_dedup-map.json`。**不依赖任何临时
+只依赖 reduce 阶段的标准产物：`.wiki-tree/extracted/*.json`、`.wiki-tree/centrality.json`、
+`summaries/topic-*.md`（Phase 6 产出），可选 `.wiki-tree/_dedup-map.json`。**不依赖任何临时
 中间文件**——主题列表/一句话直接从 summaries 与 extracted 派生。
 
 用法:
@@ -43,7 +43,7 @@ def _toks(s):
 
 
 def build_kb(vault, kid, name, scope, extra_use_when=None):
-    mw = os.path.join(vault, ".memory-wiki")
+    mw = os.path.join(vault, ".wiki-tree")
     ext = os.path.join(mw, "extracted")
     cent = json.load(open(os.path.join(mw, "centrality.json"), encoding="utf-8"))
     try:
@@ -145,8 +145,8 @@ def build_kb(vault, kid, name, scope, extra_use_when=None):
             "documents_dir": "documents/",
             "entities_dir": "entities/",
             "knowledge_graph": "relations/_knowledge-graph.md",
-            "extracted_dir": ".memory-wiki/extracted/",
-            "search_index": ".memory-wiki/search-index.json",
+            "extracted_dir": ".wiki-tree/extracted/",
+            "search_index": ".wiki-tree/search-index.json",
         },
         "query": {
             "cli": "python kb_query.py \"{question}\" [--level short|detailed|full] [--json]",
@@ -155,7 +155,7 @@ def build_kb(vault, kid, name, scope, extra_use_when=None):
         "levels": [
             "L2 global_summary (summaries/_global-summary.md)",
             "L1 topic summary (summaries/topic-*.md)",
-            "doc detailed_summary (.memory-wiki/extracted/*.json)",
+            "doc detailed_summary (.wiki-tree/extracted/*.json)",
             "L0 full document (documents/*.md)",
         ],
         "topics": topics,

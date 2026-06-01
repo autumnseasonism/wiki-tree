@@ -36,7 +36,7 @@ def load_manifest(vault):
     """读取增量 manifest 的 processed 段；vault 为空或文件不存在/损坏时返回 {}。"""
     if not vault:
         return {}
-    mpath = Path(vault) / ".memory-wiki" / "manifest.json"
+    mpath = Path(vault) / ".wiki-tree" / "manifest.json"
     if not mpath.exists():
         return {}
     try:
@@ -80,7 +80,7 @@ def _is_excluded(rel_posix: str, name: str, patterns) -> bool:
 def scan_folder(target_path, vault=None, exclude=None):
     """递归扫描文件夹，返回分类统计。
 
-    vault 非空时进入增量模式：读取 vault/.memory-wiki/manifest.json，为每个文件
+    vault 非空时进入增量模式：读取 vault/.wiki-tree/manifest.json，为每个文件
     标记 new/modified/done，处理计划只覆盖待处理（new+modified）集，已完成的跳过。
     被 >100 推迟的文件不会被写入 manifest，因此下一轮仍是 new，会被自动补上。
 
@@ -251,7 +251,7 @@ def main():
     parser.add_argument("path", help="目标文件夹路径")
     parser.add_argument("--output", "-o", help="输出 JSON 报告路径（默认 stdout）")
     parser.add_argument("--vault", help="已有 Vault 路径；提供则进入增量模式"
-                                        "（读取 .memory-wiki/manifest.json，跳过已处理文档）")
+                                        "（读取 .wiki-tree/manifest.json，跳过已处理文档）")
     parser.add_argument("--exclude", action="append", default=[],
                         help="排除匹配该 glob 的文件/目录（可多次指定）；"
                              "目标根目录的 .mwignore 也会被读取并合并")

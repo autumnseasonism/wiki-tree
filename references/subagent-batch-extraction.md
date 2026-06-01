@@ -30,7 +30,7 @@
 3. **幻觉闸门（确定性脚本）**：用 `python scripts/verify_entities.py --doc <doc_md> --entities <实体JSON>` 过滤——纯 ASCII 实体按**词边界**、含非 ASCII 按**子串**判断是否在原文出现，未出现的丢弃。（跨语言/译名变体的合并不在这里做，留给 reduce 阶段。）
 4. **关系抽取**：按第 3 节，基于过闸后的实体推断 `relations`（只取有明确证据的）。
 5. **摘要**：按第 2 节生成 `short_summary / detailed_summary / key_decisions / key_dates / key_people`。
-6. **落盘**：把结果写成 `<vault>/.memory-wiki/extracted/<doc-id>.json`（schema 见下）。`<doc-id>` 取 `doc_md` 的文件名（去扩展名）。
+6. **落盘**：把结果写成 `<vault>/.wiki-tree/extracted/<doc-id>.json`（schema 见下）。`<doc-id>` 取 `doc_md` 的文件名（去扩展名）。
 7. **不在此写 manifest**：把本篇的 `{source_path, doc_md, doc_id}` 累加到本批的 `done` 清单（见下方返回契约）。**登记 manifest 由主 agent 在收齐所有 worker 后串行完成，子 agent 绝不直接调 `update_manifest`。**
 
 > **为什么子 agent 不自己写 manifest**：manifest 是单个共享 JSON，多个 worker 并发"读-改-写"会丢更新（原子写只防文件损坏，不防丢更新）。所以分工是：每篇的 `extracted/<doc-id>.json` **各写各的**（文件名唯一、无竞态，可逐篇落盘以抗崩溃）；而对 **manifest 的写入收归主 agent 单一写入者**。即使某篇暂时没被登记，它的 `extracted/<doc-id>.json` 仍在磁盘上、reduce 照样会纳入——最坏只是下一轮多处理它一次，不会重复、不会丢数据。
@@ -85,9 +85,9 @@
 
 主 agent 收齐所有 worker 的返回后：
 
-1. **登记 manifest（单一写入者，无竞态）**：把各 worker 的 `done` 清单合并成一个 JSON 数组，写到 `{vault}/.memory-wiki/_marks.json`，调一次：
+1. **登记 manifest（单一写入者，无竞态）**：把各 worker 的 `done` 清单合并成一个 JSON 数组，写到 `{vault}/.wiki-tree/_marks.json`，调一次：
    ```
-   python scripts/update_manifest.py --vault {vault} --mark-from {vault}/.memory-wiki/_marks.json
+   python scripts/update_manifest.py --vault {vault} --mark-from {vault}/.wiki-tree/_marks.json
    ```
    `--mark-from` 一次性读改写整份 manifest，由主 agent 串行调用，彻底避开并发写丢更新。
 2. **reduce**：扫 `extracted/*.json` 全集 → 实体去重/中心度（Phase 5）→ L1 主题摘要 / L2 全局摘要（Phase 6）→ 回填 Vault 模板。

@@ -44,7 +44,7 @@ def _edit_distance(a: str, b: str) -> int:
 def collect_entities(vault: Path):
     """返回 {实体名: 出现的不同文档数}。"""
     freq = defaultdict(set)
-    d = vault / ".memory-wiki" / "extracted"
+    d = vault / ".wiki-tree" / "extracted"
     for fp in sorted(d.glob("*.json")) if d.is_dir() else []:
         try:
             with open(fp, "r", encoding="utf-8") as f:

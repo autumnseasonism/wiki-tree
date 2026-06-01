@@ -70,9 +70,9 @@ def main():
         # ---------- 2. generate: 目录 + 底座 + create-if-missing + L7 配色 ----------
         print("[2] generate_wiki_structure")
         v = W / "vault"; run(SC / "generate_wiki_structure.py", "--output", v)
-        for dd in ("documents", "summaries", "entities", "relations", ".obsidian", ".memory-wiki/extracted"):
+        for dd in ("documents", "summaries", "entities", "relations", ".obsidian", ".wiki-tree/extracted"):
             check(f"目录 {dd}", (v / dd).is_dir())
-        check("空 manifest", jload(v / ".memory-wiki/manifest.json")["processed"] == {})
+        check("空 manifest", jload(v / ".wiki-tree/manifest.json")["processed"] == {})
         idx = v / "_index.md"; idx.write_text(idx.read_text(encoding="utf-8") + "\nKEEP\n", encoding="utf-8")
         run(SC / "generate_wiki_structure.py", "--output", v)
         check("create-if-missing 不覆盖", "KEEP" in idx.read_text(encoding="utf-8"))
@@ -159,22 +159,22 @@ def main():
             {"source_path": str(cs / "t.csv"), "doc_md": "documents/t.md", "doc_id": "t"},
         ], ensure_ascii=False), encoding="utf-8")
         run(SC / "update_manifest.py", "--vault", mv, "--mark-from", mf)
-        man = jload(mv / ".memory-wiki/manifest.json")
+        man = jload(mv / ".wiki-tree/manifest.json")
         check("mark-from 登记 2 且 status=done",
               len(man["processed"]) == 2 and all(x["status"] == "done" for x in man["processed"].values()))
 
         # L4: 损坏 manifest → 非破坏性（带时间戳备份，连续损坏不互相覆盖）
-        bad = W / "badv"; (bad / ".memory-wiki").mkdir(parents=True)
-        (bad / ".memory-wiki/manifest.json").write_text("{ 这不是合法 json", encoding="utf-8")
+        bad = W / "badv"; (bad / ".wiki-tree").mkdir(parents=True)
+        (bad / ".wiki-tree/manifest.json").write_text("{ 这不是合法 json", encoding="utf-8")
         run(SC / "update_manifest.py", "--vault", bad, "--mark", str(cs / "m.md"), "--doc-md", "documents/m.md")
-        bk = list((bad / ".memory-wiki").glob("manifest.corrupt-*.json"))
+        bk = list((bad / ".wiki-tree").glob("manifest.corrupt-*.json"))
         check("L4: 损坏 manifest 已备份(非破坏)", len(bk) == 1, [b.name for b in bk])
         check("L4: 备份保留损坏内容", bool(bk) and "这不是合法 json" in bk[0].read_text(encoding="utf-8"))
-        check("L4: 重置后新 mark 写入成功", len(jload(bad / ".memory-wiki/manifest.json")["processed"]) == 1)
-        (bad / ".memory-wiki/manifest.json").write_text("{ 再次损坏", encoding="utf-8")
+        check("L4: 重置后新 mark 写入成功", len(jload(bad / ".wiki-tree/manifest.json")["processed"]) == 1)
+        (bad / ".wiki-tree/manifest.json").write_text("{ 再次损坏", encoding="utf-8")
         run(SC / "update_manifest.py", "--vault", bad, "--mark", str(cs / "dupA.txt"), "--doc-md", "documents/dupA.md")
         check("L4: 连续损坏产生 2 个独立备份",
-              len(list((bad / ".memory-wiki").glob("manifest.corrupt-*.json"))) == 2)
+              len(list((bad / ".wiki-tree").glob("manifest.corrupt-*.json"))) == 2)
 
         # ---------- 5. verify_entities: L6 词边界 ----------
         print("[5] verify_entities")
@@ -209,12 +209,12 @@ def main():
 
         # ---------- 6. compute_centrality: F4 degree=不同邻居数 ----------
         print("[6] compute_centrality")
-        cev = W / "cev"; (cev / ".memory-wiki/extracted").mkdir(parents=True)
-        (cev / ".memory-wiki/extracted/d1.json").write_text(json.dumps({"doc_id": "d1",
+        cev = W / "cev"; (cev / ".wiki-tree/extracted").mkdir(parents=True)
+        (cev / ".wiki-tree/extracted/d1.json").write_text(json.dumps({"doc_id": "d1",
             "entities": [{"kind": "concept", "text": t} for t in ("A", "B", "C")],
             "relations": [{"subject": "A", "predicate": "USES", "object": "B"},
                           {"subject": "A", "predicate": "USES", "object": "C"}]}, ensure_ascii=False), encoding="utf-8")
-        (cev / ".memory-wiki/extracted/d2.json").write_text(json.dumps({"doc_id": "d2",
+        (cev / ".wiki-tree/extracted/d2.json").write_text(json.dumps({"doc_id": "d2",
             "entities": [{"kind": "concept", "text": t} for t in ("A", "B")],
             "relations": [{"subject": "A", "predicate": "USES", "object": "B"}]}, ensure_ascii=False), encoding="utf-8")
         co = jload_str(run(SC / "compute_centrality.py", "--vault", cev, "-o", W / "cen.json").stdout and (W / "cen.json").read_text(encoding="utf-8"))
@@ -231,8 +231,8 @@ def main():
         (f1 / "sub" / "copy.md").write_text("唯一X", encoding="utf-8")
         (f1 / "uniq.md").write_text("内容Y", encoding="utf-8")
         fv = W / "fv"; run(SC / "generate_wiki_structure.py", "--output", fv)
-        run(SC / "scan_folder.py", f1, "-o", fv / ".memory-wiki/scan.json")
-        run(SC / "convert_documents.py", "--scan-report", fv / ".memory-wiki/scan.json", "--output", fv)
+        run(SC / "scan_folder.py", f1, "-o", fv / ".wiki-tree/scan.json")
+        run(SC / "convert_documents.py", "--scan-report", fv / ".wiki-tree/scan.json", "--output", fv)
         rc = jload(fv / "_conversion_report.json")
         dup = next((x for x in rc["details"] if x["status"] == "skipped"), None)
         check("copy.md 被判内容副本", dup is not None)
@@ -240,10 +240,10 @@ def main():
         marks = [{"source_path": str(f1 / "doc.md"), "doc_md": "documents/doc.md", "doc_id": "doc"},
                  {"source_path": str(f1 / "uniq.md"), "doc_md": "documents/uniq.md", "doc_id": "uniq"},
                  {"source_path": dup["source"], "doc_md": canon, "doc_id": Path(canon).stem}]
-        (fv / ".memory-wiki/_marks.json").write_text(json.dumps(marks, ensure_ascii=False), encoding="utf-8")
-        run(SC / "update_manifest.py", "--vault", fv, "--mark-from", fv / ".memory-wiki/_marks.json")
-        run(SC / "scan_folder.py", f1, "--vault", fv, "-o", fv / ".memory-wiki/scan2.json")
-        check("F1: 副本登记后第二轮 pending=0", jload(fv / ".memory-wiki/scan2.json")["pending_count"] == 0)
+        (fv / ".wiki-tree/_marks.json").write_text(json.dumps(marks, ensure_ascii=False), encoding="utf-8")
+        run(SC / "update_manifest.py", "--vault", fv, "--mark-from", fv / ".wiki-tree/_marks.json")
+        run(SC / "scan_folder.py", f1, "--vault", fv, "-o", fv / ".wiki-tree/scan2.json")
+        check("F1: 副本登记后第二轮 pending=0", jload(fv / ".wiki-tree/scan2.json")["pending_count"] == 0)
 
         # ---------- 8. F3: 无 PYTHONUTF8 时中文 stdout 不乱 ----------
         print("[8] F3 UTF-8 stdout")
@@ -295,13 +295,13 @@ def main():
         # 9d 增量 modified：源 mtime 变化 → 重新待处理
         ms = W / "ms"; ms.mkdir(); (ms / "x.md").write_text("内容X", encoding="utf-8")
         mvt = W / "mvt"; run(SC / "generate_wiki_structure.py", "--output", mvt)
-        run(SC / "scan_folder.py", ms, "-o", mvt / ".memory-wiki/scan.json")
+        run(SC / "scan_folder.py", ms, "-o", mvt / ".wiki-tree/scan.json")
         run(SC / "update_manifest.py", "--vault", mvt, "--mark", str(ms / "x.md"), "--doc-md", "documents/x.md")
-        run(SC / "scan_folder.py", ms, "--vault", mvt, "-o", mvt / ".memory-wiki/s1.json")
-        check("增量: 未改动 → done(pending 0)", jload(mvt / ".memory-wiki/s1.json")["pending_count"] == 0)
+        run(SC / "scan_folder.py", ms, "--vault", mvt, "-o", mvt / ".wiki-tree/s1.json")
+        check("增量: 未改动 → done(pending 0)", jload(mvt / ".wiki-tree/s1.json")["pending_count"] == 0)
         os.utime(ms / "x.md", (1_700_000_000, 1_700_000_000))  # 强制改 mtime
-        run(SC / "scan_folder.py", ms, "--vault", mvt, "-o", mvt / ".memory-wiki/s2.json")
-        s2 = jload(mvt / ".memory-wiki/s2.json")
+        run(SC / "scan_folder.py", ms, "--vault", mvt, "-o", mvt / ".wiki-tree/s2.json")
+        s2 = jload(mvt / ".wiki-tree/s2.json")
         st = {Path(f["path"]).name: f["status"] for f in s2["files"]}
         check("增量: mtime 变化 → modified(重新 pending)", st.get("x.md") == "modified" and s2["pending_count"] == 1, str(st))
 
@@ -355,7 +355,7 @@ def main():
         ]}
         crj = W / "fake_cr.json"; crj.write_text(json.dumps(fake_cr, ensure_ascii=False), encoding="utf-8")
         run(SC / "update_manifest.py", "--vault", crv, "--from-conversion-report", crj)
-        cman = jload(crv / ".memory-wiki/manifest.json")["processed"]
+        cman = jload(crv / ".wiki-tree/manifest.json")["processed"]
         check("from-conversion-report: success+去重副本各登记(2)、error 不登记", len(cman) == 2, len(cman))
         dup_rec = cman.get(str(Path(str(cs / "dupB.txt")).resolve()))
         check("from-conversion-report: 副本 doc_md 指向 canonical",
@@ -365,14 +365,14 @@ def main():
         marks_f.write_text(json.dumps([{"source_path": str(cs / "m.md"), "doc_md": "documents/m.md", "doc_id": "m"}], ensure_ascii=False), encoding="utf-8")
         run(SC / "update_manifest.py", "--vault", cmv, "--mark-from", marks_f, "--clean-marks")
         check("--clean-marks: 清单文件被删除", not marks_f.exists())
-        check("--clean-marks: 仍正确登记", len(jload(cmv / ".memory-wiki/manifest.json")["processed"]) == 1)
+        check("--clean-marks: 仍正确登记", len(jload(cmv / ".wiki-tree/manifest.json")["processed"]) == 1)
 
         # ---------- 13. assemble_vault: 统计回填 + 卡片骨架 + 零悬空 + create-if-missing ----------
         print("[13] assemble_vault")
         av = W / "av"; run(SC / "generate_wiki_structure.py", "--output", av)
         (av / "documents/doc1.md").write_text("# doc1\n项目P 工具T 概念C", encoding="utf-8")
         (av / "documents/doc2.md").write_text("# doc2\n工具T 概念C", encoding="utf-8")
-        exd = av / ".memory-wiki/extracted"
+        exd = av / ".wiki-tree/extracted"
         (exd / "doc1.json").write_text(json.dumps({
             "doc_id": "doc1", "doc_md": "documents/doc1.md", "short_summary": "文档一概要", "importance": 0.9,
             "topics": ["主题甲"],
@@ -390,10 +390,10 @@ def main():
               (av / "_index.md").exists() and (av / "relations/_knowledge-graph.md").exists() and (av / "_processing-report.md").exists())
         check("assemble: _index 统计回填", "文档总数**：2" in (av / "_index.md").read_text(encoding="utf-8"))
         check("assemble: 卡片建给连通实体(degree>=1)", asum["cards_created"] >= 3, asum["cards_created"])
-        notes = {p.stem for p in av.rglob("*.md") if ".memory-wiki" not in p.parts}
+        notes = {p.stem for p in av.rglob("*.md") if ".wiki-tree" not in p.parts}
         dangling = []
         for p in av.rglob("*.md"):
-            if ".memory-wiki" in p.parts:
+            if ".wiki-tree" in p.parts:
                 continue
             for m in re.finditer(r"\[\[([^\]]+)\]\]", p.read_text(encoding="utf-8")):
                 tgt = m.group(1).split("|")[0].split("#")[0].strip().split("/")[-1]
@@ -407,8 +407,8 @@ def main():
 
         # ---------- 14. suggest_dedup: 候选变体挖掘 ----------
         print("[14] suggest_dedup")
-        sv = W / "sv"; (sv / ".memory-wiki/extracted").mkdir(parents=True)
-        (sv / ".memory-wiki/extracted/d.json").write_text(json.dumps({"doc_id": "d",
+        sv = W / "sv"; (sv / ".wiki-tree/extracted").mkdir(parents=True)
+        (sv / ".wiki-tree/extracted/d.json").write_text(json.dumps({"doc_id": "d",
             "entities": [{"kind": "tool", "text": "Chart.js"}, {"kind": "tool", "text": "chartjs"},
                          {"kind": "concept", "text": "RAG"}, {"kind": "concept", "text": "RAG系统"}]}, ensure_ascii=False), encoding="utf-8")
         sd = jload_str(run(SC / "suggest_dedup.py", "--vault", sv).stdout)

@@ -2,7 +2,7 @@
 """
 compute_centrality.py — 从 extracted/*.json 确定性地计算实体中心度
 
-读取 <vault>/.memory-wiki/extracted/*.json，对每个实体统计三项信号：
+读取 <vault>/.wiki-tree/extracted/*.json，对每个实体统计三项信号：
   - degree        ：与它直接相连的**不同实体数**（标准图度数，跳过自环）—— 图谱枢纽程度
   - relation_count：连在它身上的**关系边条数**（同一对实体跨文档重复也累加）—— 被引用强度
   - doc_count     ：它出现过的不同文档数（entities 列表 ∪ 关系端点）—— 覆盖面
@@ -44,7 +44,7 @@ def canon(name, dmap):
 
 
 def compute(vault: Path, dmap: dict):
-    extracted_dir = vault / ".memory-wiki" / "extracted"
+    extracted_dir = vault / ".wiki-tree" / "extracted"
     files = sorted(extracted_dir.glob("*.json")) if extracted_dir.is_dir() else []
 
     relation_count = defaultdict(int)  # 实体 → 关系边条数（含跨文档重复）

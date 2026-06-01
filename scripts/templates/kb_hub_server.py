@@ -54,7 +54,7 @@ def _index(root, kb):
     """加载预分词检索索引并按 root 缓存（常驻进程：首查加载、后续复用）；无则返回 None。"""
     if root in _IDX_CACHE:
         return _IDX_CACHE[root]
-    rel = kb.get("entrypoints", {}).get("search_index", ".memory-wiki/search-index.json")
+    rel = kb.get("entrypoints", {}).get("search_index", ".wiki-tree/search-index.json")
     p = os.path.join(root, rel)
     rows = None
     if os.path.exists(p):

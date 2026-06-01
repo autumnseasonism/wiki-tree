@@ -2,12 +2,12 @@
 """
 update_manifest.py — 维护增量处理 manifest（"哪些源文件已抽取完成"的唯一真相源）
 
-manifest 路径：<vault>/.memory-wiki/manifest.json
+manifest 路径：<vault>/.wiki-tree/manifest.json
 结构：{"version": 1, "updated_at": ISO, "processed": {"<源文件绝对路径>": {...}}}
 一个源文件出现在 processed 里 = 已完整处理（已抽取并落盘）。scan_folder.py 据此跳过它。
 
 用法:
-  # 仅初始化 .memory-wiki/ 底座（manifest + extracted/ 目录），不标记任何文件
+  # 仅初始化 .wiki-tree/ 底座（manifest + extracted/ 目录），不标记任何文件
   python update_manifest.py --vault /path/to/vault
 
   # 标记单个源文件为已完成（每篇文档抽取落盘后调用）
@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 
 
 def _mw_dir(vault: Path) -> Path:
-    return vault / ".memory-wiki"
+    return vault / ".wiki-tree"
 
 
 def _manifest_path(vault: Path) -> Path:
@@ -42,7 +42,7 @@ def _manifest_path(vault: Path) -> Path:
 
 
 def ensure_substrate(vault: Path) -> Path:
-    """确保 .memory-wiki/ 与 extracted/ 存在，manifest.json 存在。"""
+    """确保 .wiki-tree/ 与 extracted/ 存在，manifest.json 存在。"""
     (_mw_dir(vault) / "extracted").mkdir(parents=True, exist_ok=True)
     mpath = _manifest_path(vault)
     if not mpath.exists():

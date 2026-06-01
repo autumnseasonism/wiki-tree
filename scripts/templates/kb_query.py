@@ -59,7 +59,7 @@ def _iter_extracted():
 
 def _load_index():
     """读预分词检索索引（一次只读 1 个文件）；无则返回 None → 回退扫 extracted。"""
-    rel = KB.get("entrypoints", {}).get("search_index", ".memory-wiki/search-index.json")
+    rel = KB.get("entrypoints", {}).get("search_index", ".wiki-tree/search-index.json")
     p = os.path.join(ROOT, rel)
     if os.path.exists(p):
         try:

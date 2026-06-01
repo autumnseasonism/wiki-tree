@@ -46,7 +46,7 @@ def _now() -> str:
 
 
 def load_extracted(vault: Path):
-    d = vault / ".memory-wiki" / "extracted"
+    d = vault / ".wiki-tree" / "extracted"
     docs = []
     if d.is_dir():
         for fp in sorted(d.glob("*.json")):
@@ -123,7 +123,7 @@ def main():
         pass
     ap = argparse.ArgumentParser(description="确定性汇总 extracted/*.json 为 Vault 产物")
     ap.add_argument("--vault", required=True, help="Vault 根目录")
-    ap.add_argument("--dedup-map", help="变体→规范名 JSON；默认自动读取 .memory-wiki/_dedup-map.json")
+    ap.add_argument("--dedup-map", help="变体→规范名 JSON；默认自动读取 .wiki-tree/_dedup-map.json")
     ap.add_argument("--top", type=int, default=10, help="_index.md 核心实体数（默认 10）")
     ap.add_argument("--cards-all", action="store_true", help="为所有实体建卡")
     ap.add_argument("--card-top", type=int, default=0, help="只为中心度前 N 实体建卡（0=不启用）")
@@ -134,11 +134,11 @@ def main():
     args = ap.parse_args()
 
     vault = Path(args.vault)
-    if not (vault / ".memory-wiki" / "extracted").is_dir():
-        print(f"错误: 未找到 {vault}\\.memory-wiki\\extracted（先跑抽取阶段）", file=sys.stderr)
+    if not (vault / ".wiki-tree" / "extracted").is_dir():
+        print(f"错误: 未找到 {vault}\\.wiki-tree\\extracted（先跑抽取阶段）", file=sys.stderr)
         sys.exit(1)
 
-    dmap_path = args.dedup_map or (vault / ".memory-wiki" / "_dedup-map.json")
+    dmap_path = args.dedup_map or (vault / ".wiki-tree" / "_dedup-map.json")
     dmap = load_dedup_map(str(dmap_path)) if Path(dmap_path).exists() else {}
 
     docs = load_extracted(vault)
@@ -265,7 +265,7 @@ def main():
         written["files"].append("_index.md")
 
     # ---- _processing-report.md ----
-    scan = _load_json(vault / ".memory-wiki" / "scan.json") or {}
+    scan = _load_json(vault / ".wiki-tree" / "scan.json") or {}
     conv = _load_json(vault / "_conversion_report.json") or {}
     n_rel = sum(len(d.get("relations", []) or []) for d in docs)
     rep = [

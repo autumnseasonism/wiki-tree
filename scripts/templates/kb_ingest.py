@@ -290,7 +290,7 @@ def _file_hash(p):
 
 
 def stage(src, vault):
-    inbox = Path(vault) / ".memory-wiki" / "_ingest"
+    inbox = Path(vault) / ".wiki-tree" / "_ingest"
     inbox.mkdir(parents=True, exist_ok=True)
     dest = inbox / src.name
     if dest.exists():
@@ -352,7 +352,7 @@ def _run(cmd):
 def stage_build(vault, scripts):
     """确定性：增量 scan + convert（抽取前可做的全部）。"""
     py = sys.executable
-    mw = Path(vault) / ".memory-wiki"
+    mw = Path(vault) / ".wiki-tree"
     inbox, scan_out = str(mw / "_ingest"), str(mw / "_ingest_scan.json")
     _run([py, str(Path(scripts) / "scan_folder.py"), inbox, "--vault", vault, "-o", scan_out])
     _run([py, str(Path(scripts) / "convert_documents.py"),
@@ -362,7 +362,7 @@ def stage_build(vault, scripts):
 def finalize(vault, kb, scripts):
     """确定性 reduce + 重建索引 + 更新 registry（应在 agent 完成抽取后调用）。"""
     py = sys.executable
-    mw = Path(vault) / ".memory-wiki"
+    mw = Path(vault) / ".wiki-tree"
     cc = [py, str(Path(scripts) / "compute_centrality.py"), "--vault", vault]
     if (mw / "_dedup-map.json").exists():
         cc += ["--dedup-map", str(mw / "_dedup-map.json")]
@@ -378,7 +378,7 @@ def finalize(vault, kb, scripts):
 
 
 def rollback(vault, basename):
-    mw = Path(vault) / ".memory-wiki"
+    mw = Path(vault) / ".wiki-tree"
     removed = []
     staged = mw / "_ingest" / basename
     if staged.exists():
@@ -469,12 +469,12 @@ def print_handoff(by_kb, scripts, built):
         print("\n[%s] vault: %s" % (kid, vault))
         if not built:
             print("  1) 增量扫描+转换（确定性；本脚本可代跑：加 --build）:")
-            print('     python "%s/scan_folder.py" "%s/.memory-wiki/_ingest" --vault "%s" -o "%s/.memory-wiki/_ingest_scan.json"'
+            print('     python "%s/scan_folder.py" "%s/.wiki-tree/_ingest" --vault "%s" -o "%s/.wiki-tree/_ingest_scan.json"'
                   % (sd, vault, vault, vault))
-            print('     python "%s/convert_documents.py" --scan-report "%s/.memory-wiki/_ingest_scan.json" --output "%s"'
+            print('     python "%s/convert_documents.py" --scan-report "%s/.wiki-tree/_ingest_scan.json" --output "%s"'
                   % (sd, vault, vault))
         print("  2) 抽取（LLM·agent）: 读 documents/ 新增 .md，按 references/subagent-batch-extraction.md")
-        print("     写 .memory-wiki/extracted/<doc-id>.json；再登记 manifest:")
+        print("     写 .wiki-tree/extracted/<doc-id>.json；再登记 manifest:")
         print('     python "%s/update_manifest.py" --vault "%s" --from-conversion-report "%s/_conversion_report.json"'
               % (sd, vault, vault))
         print("  3) 收尾（确定性；本脚本可代跑：python kb_ingest.py --finalize --kb %s）:" % kid)
