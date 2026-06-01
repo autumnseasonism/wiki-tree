@@ -49,7 +49,7 @@ DEFAULT_POLICY = {
     "min_score": 2.0,         # 最低绝对分（低于则判“无匹配/待归类”）
     "ratio": 1.5,             # 第一名需 ≥ 第二名的多少倍才算“高置信”
     "per_kb_override": {},    # {kb_id: {"min_score": .., "ratio": ..}}
-    "skill_scripts_dir": "",  # local-memory-wiki/scripts 目录；留空自动探测
+    "skill_scripts_dir": "",  # memory-wiki/scripts 目录；留空自动探测
 }
 
 SUPPORTED = {".docx", ".pdf", ".md", ".markdown", ".mdx",
@@ -334,8 +334,8 @@ def do_writes(do, regmap, mode):
 # ---------------- 确定性管线（调 skill 脚本）----------------
 def resolve_scripts_dir(pol):
     cands = [pol.get("skill_scripts_dir") or "",
-             str(HOME / ".claude" / "skills" / "local-memory-wiki" / "scripts"),
-             str(HOME / ".codex" / "skills" / "local-memory-wiki" / "scripts")]
+             str(HOME / ".claude" / "skills" / "memory-wiki" / "scripts"),
+             str(HOME / ".codex" / "skills" / "memory-wiki" / "scripts")]
     for c in cands:
         if c and (Path(c) / "scan_folder.py").exists():
             return c
@@ -463,7 +463,7 @@ def _ask_pick(p):
 
 
 def print_handoff(by_kb, scripts, built):
-    sd = scripts or "<local-memory-wiki/scripts>"
+    sd = scripts or "<memory-wiki/scripts>"
     print("\n=== 后续：抽取 + reduce（抽取/摘要是 LLM 步，由 agent 按 SKILL.md 完成）===")
     for kid, vault in by_kb.items():
         print("\n[%s] vault: %s" % (kid, vault))
@@ -532,7 +532,7 @@ def main():
             print("错误：KB '%s' 的 root 无效/不存在: %r" % (a.kb, root), file=sys.stderr)
             sys.exit(2)
         if not scripts:
-            print("错误：找不到 local-memory-wiki/scripts；请在 ingest-policy.json 设 skill_scripts_dir",
+            print("错误：找不到 memory-wiki/scripts；请在 ingest-policy.json 设 skill_scripts_dir",
                   file=sys.stderr)
             sys.exit(2)
         try:

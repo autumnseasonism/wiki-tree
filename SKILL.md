@@ -1,5 +1,5 @@
 ---
-name: local-memory-wiki
+name: memory-wiki
 description: "Turn a folder of mixed local documents into a structured personal knowledge base — browsable in Obsidian and queryable by any AI agent. Scans a folder for Word/PDF/Markdown/JSON/CSV/text files, converts them to Markdown, extracts entities, relationships and topics, and builds an Obsidian-compatible vault: entity cards, wikilinks, a knowledge graph, and hierarchical summaries (document → topic → global). It also emits an access bundle (a kb_query CLI + MCP server) so the wiki becomes a searchable knowledge base agents can query across runtimes; supports incremental re-runs and optional parallel extraction. Use whenever the user wants to 把资料/文档整理成知识库、建 Obsidian wiki/vault、扫描文件夹提取知识、把一堆文档/PDF/Word/笔记做成可浏览或可检索的知识库、给文档建索引、做成 agent 能查询的本地知识库/第二大脑 — or points at a local folder of mixed documents and wants it organized, summarized, searchable or queryable, even without saying 'Obsidian' or 'wiki'. Not for editing one file, web scraping, or building a website."
 when_to_use: "User has a folder or pile of mixed local files (notes, manuals, reports, exports, PDFs, Word docs, JSON/chat dumps) that's too big to read and wants it organized, summarized, cross-linked, made searchable, or turned into a knowledge base / wiki / 第二大脑 — e.g. 文档太多帮我归纳整理、建本地知识库、把笔记变可检索、做成 agent/MCP 能查的库. Also when re-running to incrementally fold in newly added documents."
 license: MIT
@@ -12,7 +12,7 @@ metadata:
     related_skills: [flow-any]
 ---
 
-# Local Memory Wiki — 本地文档记忆抽取 → Obsidian Wiki
+# Memory Wiki — 本地文档记忆抽取 → Obsidian Wiki
 
 将任意本地文件夹中的文档转化为结构化的 Obsidian 知识库——记忆抽取、实体关联、层级摘要、wikilink 图谱，一键生成。
 

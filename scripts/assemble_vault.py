@@ -235,7 +235,7 @@ def main():
         idx = [
             "---\nkind: index\ncreated_at: " + _now() + "\ntags:\n  - index\n  - source/local-files\n---\n",
             "# 📚 个人知识库索引\n",
-            "> 本知识库由 Local Memory Wiki 自动生成（索引统计由 assemble_vault.py 回填）\n",
+            "> 本知识库由 Memory Wiki 自动生成（索引统计由 assemble_vault.py 回填）\n",
             "## 📊 统计\n",
             f"- **文档总数**：{len(docs)}",
             f"- **实体总数**：{len(rows)}",
@@ -259,8 +259,8 @@ def main():
         for m in recent:
             ss = f" — {m['short_summary']}" if m["short_summary"] else ""
             idx.append(f"- {doclink(m['doc_id'])}{ss}")
-        idx.append("\n---\n\n*本索引由 [Local Memory Wiki]"
-                   "(https://github.com/autumnseasonism/local-memory-wiki) Skill 自动生成*\n")
+        idx.append("\n---\n\n*本索引由 [Memory Wiki]"
+                   "(https://github.com/autumnseasonism/memory-wiki) Skill 自动生成*\n")
         (vault / "_index.md").write_text("\n".join(idx), encoding="utf-8")
         written["files"].append("_index.md")
 

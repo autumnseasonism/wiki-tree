@@ -83,7 +83,7 @@ tags:
 
 # 📚 个人知识库索引
 
-> 本知识库由 Local Memory Wiki 自动生成
+> 本知识库由 Memory Wiki 自动生成
 
 ## 📊 统计
 
@@ -111,7 +111,7 @@ tags:
 
 ---
 
-*本索引由 [Local Memory Wiki](https://github.com/autumnseasonism/local-memory-wiki) Skill 自动生成*
+*本索引由 [Memory Wiki](https://github.com/autumnseasonism/memory-wiki) Skill 自动生成*
 """
     (vault_path / "_index.md").write_text(index_content, encoding="utf-8")
 
