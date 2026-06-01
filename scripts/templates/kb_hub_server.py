@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""kb_hub_server.py — 全局 KB 中枢 MCP 服务。
+"""kb_hub_server.py — 全局 KB 中枢 MCP 服务（进程内直读，无子进程）。
 
 读 ~/.knowledge-bases/registry.json，把本机**所有**已注册知识库暴露为 MCP 工具：
   list_knowledge_bases / kb_search / kb_topic / kb_document
-支持 MCP 的客户端（Claude Code / Codex …）连上后会在工具列表里自动看到它们，
-据描述判断何时调用——无需任何指令文件。新增 KB 只要重跑 kb_register.py
-（registry 多一条），本服务动态读取、**无需改任何配置**。
+支持 MCP 的客户端连上后工具列表自动出现；新增 KB 重跑 kb_register.py 即动态生效。
+
+实现说明：检索逻辑**在本进程内直接读各库文件**（按 registry 的 root 定位），不 spawn
+子进程——避免"在 async stdio MCP 服务里跑阻塞 subprocess"在 Windows 上的管道句柄死锁，
+并省掉每次冷启动。逻辑与各库的 kb_query.py 等价（四档下钻 short|detailed|full）。
 
 依赖: pip install "mcp[cli]"
-注册示例:
-  Codex     ~/.codex/config.toml:  [mcp_servers.kb_hub]  command="python" args=["<此文件绝对路径>"]
-  Claude Code:  claude mcp add -s user kb-hub -- python "<此文件绝对路径>"
 """
 import os
+import re
 import sys
 import json
-import subprocess
+import glob
 
 REG = os.path.expanduser("~/.knowledge-bases/registry.json")
 
@@ -35,11 +35,75 @@ def _kb(kid):
     return None
 
 
-def _run(kb, extra):
-    kbq = os.path.join(kb["root"], "kb_query.py")
-    p = subprocess.run([sys.executable, kbq] + extra,
-                       capture_output=True, text=True, encoding="utf-8")
-    return p.stdout or p.stderr or "(无输出)"
+def _toks(s):
+    return set(re.findall(r"[a-z0-9]+|[一-鿿]", (s or "").lower()))
+
+
+def _kbjson(root):
+    return json.load(open(os.path.join(root, "kb.json"), encoding="utf-8"))
+
+
+def _search(root, q, top, level):
+    kb = _kbjson(root)
+    qt = _toks(q)
+    if not qt:
+        return {"error": "empty query"}
+    scored = []
+    for t in kb.get("topics", []):
+        sc = len(qt & _toks(t["name"] + " " + t.get("one_liner", "")))
+        if sc:
+            scored.append((sc, t))
+    scored.sort(key=lambda x: -x[0])
+    ext = os.path.join(root, kb["entrypoints"]["extracted_dir"])
+    docs = []
+    for f in glob.glob(os.path.join(ext, "*.json")):
+        try:
+            d = json.load(open(f, encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        blob = (d.get("short_summary", "") + " " + d.get("detailed_summary", "") + " "
+                + " ".join((e.get("text") or "") for e in d.get("entities", [])))
+        sc = len(qt & _toks(blob))
+        if sc:
+            did = d.get("doc_id", "")
+            it = {"doc_id": did, "path": d.get("doc_md", "documents/%s.md" % did),
+                  "importance": d.get("importance", 0) or 0, "short": d.get("short_summary", "")}
+            if level in ("detailed", "full"):
+                it["detailed"] = d.get("detailed_summary", "")
+            docs.append((sc * (0.5 + it["importance"]), it))
+    docs.sort(key=lambda x: -x[0])
+    return {
+        "query": q, "level": level,
+        "topics": [{"name": t["name"], "summary_file": t["summary_file"],
+                    "one_liner": t.get("one_liner", "")} for _, t in scored[:3]],
+        "documents": [it for _, it in docs[:top]],
+        "cite_rule": "引用 documents/*.md 路径为据；库内不足再用通用知识/联网。",
+    }
+
+
+def _topic(root, name):
+    if not (name or "").strip():
+        return "请提供主题名"
+    kb = _kbjson(root)
+    for t in kb.get("topics", []):
+        if t["name"] == name or _toks(name) <= _toks(t["name"]):
+            p = os.path.join(root, t["summary_file"])
+            if os.path.exists(p):
+                return open(p, encoding="utf-8").read()
+    return "未找到主题: %s" % name
+
+
+def _doc(root, did, level):
+    did = os.path.basename(did[:-3] if did.endswith(".md") else did)
+    if level == "full":
+        p = os.path.join(root, "documents", did + ".md")
+        return open(p, encoding="utf-8").read() if os.path.exists(p) else "未找到原文: " + did
+    kb = _kbjson(root)
+    p = os.path.join(root, kb["entrypoints"]["extracted_dir"], did + ".json")
+    if not os.path.exists(p):
+        return "未找到抽取记录: " + did
+    d = json.load(open(p, encoding="utf-8"))
+    return d.get("detailed_summary", "") if level == "detailed" else d.get("short_summary", "")
 
 
 def _catalog():
@@ -56,8 +120,7 @@ except Exception:  # noqa: BLE001
 mcp = FastMCP("kb-hub")
 
 
-@mcp.tool(description="列出本机所有本地知识库（id / 名称 / 范围 scope / 触发词 use_when / 规模）。"
-                     "回答前先用它了解有哪些库、各自管什么。")
+@mcp.tool(description="列出本机所有本地知识库（id / 名称 / 范围 scope / 触发词 use_when / 规模）。回答前先用它了解有哪些库、各自管什么。")
 def list_knowledge_bases() -> str:
     return json.dumps(
         [{f: kb.get(f) for f in ("id", "name", "scope", "use_when", "stats")}
@@ -73,19 +136,32 @@ def kb_search(kb_id: str, question: str, level: str = "short", top: int = 5) -> 
     kb = _kb(kb_id)
     if not kb:
         return "未知 kb_id: %s（用 list_knowledge_bases 查看可用库）" % kb_id
-    return _run(kb, [question, "--json", "--level", level, "--top", str(top)])
+    try:
+        return json.dumps(_search(kb["root"], question, top, level), ensure_ascii=False, indent=2)
+    except Exception as e:  # noqa: BLE001
+        return "检索失败: %s" % e
 
 
 @mcp.tool(description="取某库某主题的完整 L1 摘要（已汇总该主题全部文档）。")
 def kb_topic(kb_id: str, name: str) -> str:
     kb = _kb(kb_id)
-    return _run(kb, ["--topic", name]) if kb else "未知 kb_id: %s" % kb_id
+    if not kb:
+        return "未知 kb_id: %s" % kb_id
+    try:
+        return _topic(kb["root"], name)
+    except Exception as e:  # noqa: BLE001
+        return "读取失败: %s" % e
 
 
 @mcp.tool(description="读某库某文档：level=short(1-2句)|detailed(逐文档详细摘要)|full(原文)。")
 def kb_document(kb_id: str, doc_id: str, level: str = "detailed") -> str:
     kb = _kb(kb_id)
-    return _run(kb, ["--doc", doc_id, "--level", level]) if kb else "未知 kb_id: %s" % kb_id
+    if not kb:
+        return "未知 kb_id: %s" % kb_id
+    try:
+        return _doc(kb["root"], doc_id, level)
+    except Exception as e:  # noqa: BLE001
+        return "读取失败: %s" % e
 
 
 if __name__ == "__main__":
