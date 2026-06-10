@@ -38,7 +38,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from compute_centrality import compute as _centrality_rows, load_dedup_map, canon  # noqa: E402
 
 _INVALID = '\\/:*?"<>|\n\r\t'
-_MAX_NAME = 80  # 文件名片段长度上限，超长截断 + 哈希后缀，避免触发文件系统路径限制
+# 文件名片段上限按 UTF-8 字节数计：Linux ext4 等限制单个文件名 255 字节（CJK 每字 3 字节），
+# 按字符数截断在 Linux 上仍会超限（80 个 CJK 字符=240 字节，加 kind 前缀/哈希/.md 即越界）。
+_MAX_NAME_BYTES = 120
 _AUTO_START = "<!-- wiki-tree:auto:start -->"
 _AUTO_END = "<!-- wiki-tree:auto:end -->"
 
@@ -48,9 +50,10 @@ def _safe(name: str) -> str:
     raw = (name or "").strip()
     out = "".join("-" if c in _INVALID else c for c in raw)
     out = out.strip() or "未命名"
-    if len(out) > _MAX_NAME:
+    if len(out.encode("utf-8")) > _MAX_NAME_BYTES:
         digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8]
-        out = out[:_MAX_NAME].rstrip() + "-" + digest
+        out = (out.encode("utf-8")[:_MAX_NAME_BYTES].decode("utf-8", errors="ignore").rstrip()
+               + "-" + digest)
     return out
 
 
