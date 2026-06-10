@@ -69,6 +69,19 @@ def canon(name, dmap):
     return dmap.get(name, name)
 
 
+def derive_doc_id(obj: dict, fallback_stem: str) -> str:
+    """从单个 extracted JSON 推导 doc_id（assemble_vault/compute_centrality/suggest_dedup 三处共用）。
+
+    doc_id 是 LLM 写的，可能与实际文档文件名漂移（doclink 会悬空、计数口径不一）：
+    优先从 doc_md 的文件名 stem 推导；doc_md 缺失才信 JSON 内 doc_id，再缺用 extracted 文件名 stem。
+    """
+    claimed = str(obj.get("doc_id") or "").strip()
+    doc_md = obj.get("doc_md")
+    if doc_md:
+        return Path(str(doc_md).replace("\\", "/")).stem
+    return claimed or fallback_stem
+
+
 def compute(vault: Path, dmap: dict):
     extracted_dir = vault / ".wiki-tree" / "extracted"
     files = sorted(extracted_dir.glob("*.json")) if extracted_dir.is_dir() else []
@@ -86,7 +99,7 @@ def compute(vault: Path, dmap: dict):
         except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
             skipped.append({"file": fp.name, "reason": str(e)})
             continue
-        doc_id = data.get("doc_id") or fp.stem
+        doc_id = derive_doc_id(data, fp.stem)
 
         # 实体列表 → 贡献 doc_count + kind 投票
         for ent in data.get("entities", []) or []:

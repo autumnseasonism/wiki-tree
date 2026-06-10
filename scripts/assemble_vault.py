@@ -13,7 +13,8 @@ scan.json / _conversion_report.json）里。本脚本把这些自动化，agent 
 以普通文本呈现 —— 因此无论建多少卡，都不会产生悬空链接。
 
 **卡片受管区段**：自动生成的统计/关联/来源包在 <!-- wiki-tree:auto:start/end --> 标记
-内；重跑只重写 front-matter + 标记区，标记外的 agent 散文原样保留。无标记的旧版卡片
+内；重跑只覆写 front-matter 受管键 + 标记区，标记外的 agent 散文与 front-matter 中
+agent/用户补写的未知键（如 Obsidian aliases）原样保留。无标记的旧版卡片
 保持现状跳过（兼容）；--force-cards 整卡重建。
 
 中心度/kind/degree 复用 compute_centrality.py 的聚合逻辑（单一真相源，避免漂移）。
@@ -35,7 +36,9 @@ from datetime import datetime, timezone
 from collections import defaultdict
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from compute_centrality import compute as _centrality_rows, load_dedup_map, canon  # noqa: E402
+from compute_centrality import (  # noqa: E402
+    compute as _centrality_rows, load_dedup_map, canon, derive_doc_id,
+)
 
 _INVALID = '\\/:*?"<>|\n\r\t'
 # 文件名片段上限按 UTF-8 字节数计：Linux ext4 等限制单个文件名 255 字节（CJK 每字 3 字节），
@@ -45,15 +48,65 @@ _AUTO_START = "<!-- wiki-tree:auto:start -->"
 _AUTO_END = "<!-- wiki-tree:auto:end -->"
 
 
-def _safe(name: str) -> str:
-    """实体名 → 安全文件名片段（仅替换文件系统非法字符；wikilink 也用此形式以保持一致）。"""
+def _safe(name: str, truncate: bool = True) -> str:
+    """实体名 → 安全文件名片段（仅替换文件系统非法字符；wikilink 也用此形式以保持一致）。
+
+    truncate=False 供 doclink 使用：文档文件由 convert_documents 落盘、文件名本就合法
+    且未截断，链接必须按原名引用 —— 截断+哈希会让长文档名的 wikilink 全部悬空。
+    """
     raw = (name or "").strip()
     out = "".join("-" if c in _INVALID else c for c in raw)
     out = out.strip() or "未命名"
-    if len(out.encode("utf-8")) > _MAX_NAME_BYTES:
+    if truncate and len(out.encode("utf-8")) > _MAX_NAME_BYTES:
         digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8]
         out = (out.encode("utf-8")[:_MAX_NAME_BYTES].decode("utf-8", errors="ignore").rstrip()
                + "-" + digest)
+    return out
+
+
+# 实体 kind 白名单（对照 references/extraction-prompts.md 的枚举）：kind 是 LLM 写的自由文本，
+# 会进卡片文件名与 tag（如 "工具/框架" 含路径分隔符，写卡会踩 FileNotFoundError），
+# 非法值统一回退 concept。
+_KINDS = frozenset({"person", "organization", "project", "concept", "tool", "date", "location", "event"})
+
+
+def _safe_kind(kind) -> str:
+    k = str(kind or "").strip().lower()
+    return k if k in _KINDS else "concept"
+
+
+# 受管 front-matter 键：受管刷新时由脚本覆写；其余键（如 Obsidian aliases）原样保留。
+_FM_MANAGED = frozenset({"kind", "entity_type", "entity", "tags", "created_at",
+                         "centrality_rank", "centrality_degree"})
+
+
+def _fm_text(v) -> str:
+    """front-matter 单行值：折叠实体名中的换行/回车，保证键值占一行、可被正则回读。"""
+    return re.sub(r"[\r\n]+", " ", str(v or "")).strip()
+
+
+def _card_entity(path: Path):
+    """读实体卡 front-matter 中记录的 entity 原始名；无 front-matter/无该键/读取失败返回 None。"""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    m = re.match(r"^---\n(.*?\n)---\n", text, re.DOTALL)
+    if not m:
+        return None
+    em = re.search(r"^entity:\s*(.+)$", m.group(1), re.MULTILINE)
+    return em.group(1).strip() if em else None
+
+
+def _fm_unmanaged_lines(fm_inner: str):
+    """从旧 front-matter 内容中取出非受管键的行（含其缩进续行），按原顺序返回。"""
+    out, keep = [], False
+    for ln in fm_inner.split("\n"):
+        m = re.match(r"^([A-Za-z_][A-Za-z0-9_-]*):", ln)
+        if m:
+            keep = m.group(1) not in _FM_MANAGED
+        if keep and ln:
+            out.append(ln)
     return out
 
 
@@ -80,14 +133,9 @@ def load_extracted(vault: Path):
             except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
                 print(f"警告: 跳过损坏 extracted {fp.name}: {e}", file=sys.stderr)
                 continue
-            # doc_id 是 LLM 写的，可能与实际文档文件名漂移（doclink 会悬空）：
-            # 优先从 doc_md 推导；doc_md 缺失才信 JSON 内 doc_id，再缺用文件名 stem
+            # doc_id 推导口径与 compute_centrality/suggest_dedup 统一（derive_doc_id）
             claimed = str(obj.get("doc_id") or "").strip()
-            doc_md = obj.get("doc_md")
-            if doc_md:
-                derived = Path(str(doc_md).replace("\\", "/")).stem
-            else:
-                derived = claimed or fp.stem
+            derived = derive_doc_id(obj, fp.stem)
             if claimed and claimed != derived:
                 print(f"警告: {fp.name} 内 doc_id={claimed!r} 与 doc_md 推导值 {derived!r} 不一致，采用后者",
                       file=sys.stderr)
@@ -211,7 +259,7 @@ def main():
     rows, _skipped = _centrality_rows(vault, dmap)
     rels, entity_docs, doc_meta, topics, bad_values = aggregate(vault, docs, dmap)
 
-    kind_of = {r["entity"]: (r["kind"] or "concept") for r in rows}
+    kind_of = {r["entity"]: _safe_kind(r["kind"]) for r in rows}
     rank_of = {r["entity"]: r["rank"] for r in rows}
 
     # 决定建卡集合
@@ -223,17 +271,31 @@ def main():
         carded = [r["entity"] for r in rows if r["degree"] >= args.cards_min_degree]
     carded_set = set(carded)
 
+    ent_dir = vault / "entities"
+
     # 卡片文件名预解析：不同实体经 _safe 清洗/截断后可能同名（含大小写不敏感文件系统），
-    # 本轮内后到者追加 -2/-3 序号。wikilink 与写盘共用该映射，保证零悬空且不指错卡。
+    # 后到者追加 -2/-3 序号。wikilink 与写盘共用该映射，保证零悬空且不指错卡。
+    # 分配顺序按 (文件名, 实体名) 排序而非中心度 rank：rank 随增量复跑漂移，
+    # 按名排序保证碰撞组内的实体跨轮拿到同一文件名，受管刷新不会把统计写进别人的卡。
+    base_of = {e: f"{kind_of.get(e, 'concept')}-{_safe(e)}" for e in carded}
     card_file = {}
     used_names = set()
     collisions = []
-    for e in carded:
-        base = f"{kind_of.get(e, 'concept')}-{_safe(e)}"
+    for e in sorted(carded, key=lambda x: (base_of[x].casefold(), x)):
+        base = base_of[e]
         fname, n = base, 2
-        while fname.casefold() in used_names:
-            fname = f"{base}-{n}"
-            n += 1
+        while True:
+            if fname.casefold() in used_names:
+                fname, n = f"{base}-{n}", n + 1
+                continue
+            # 受管刷新身份校验：磁盘上同名旧卡的 front-matter 若记录了别的实体名
+            # （历史碰撞/旧版按 rank 序分配的遗留），不动该卡，本实体当新碰撞继续探下一个
+            # 后缀；旧卡无 entity 键（老版本产物）维持现有刷新行为（兼容）。
+            owner = _card_entity(ent_dir / f"{fname}.md")
+            if owner is not None and owner != _fm_text(e):
+                fname, n = f"{base}-{n}", n + 1
+                continue
+            break
         used_names.add(fname.casefold())
         card_file[e] = fname
         if fname != base:
@@ -246,17 +308,21 @@ def main():
         return e
 
     def doclink(did):
-        return f"[[{_safe(did)}]]"
+        # 文档文件由 convert 落盘、文件名本就合法：只做非法字符替换、不截断（M4）
+        return f"[[{_safe(did, truncate=False)}]]"
 
-    def _front_matter(kind, row, created_at):
+    def _front_matter(kind, entity, row, created_at, keep_lines=()):
+        """受管 front-matter；keep_lines 为旧卡中非受管键的原始行（合并式刷新时原样保留）。"""
+        extra = ("\n".join(keep_lines) + "\n") if keep_lines else ""
         return (
-            f"---\nkind: entity\nentity_type: {kind}\ntags:\n  - {kind}\n  - source/local-files\n"
-            f"created_at: {created_at}\ncentrality_rank: {row['rank']}\ncentrality_degree: {row['degree']}\n---\n"
+            f"---\nkind: entity\nentity_type: {kind}\nentity: {_fm_text(entity)}\n"
+            f"tags:\n  - {kind}\n  - source/local-files\n"
+            f"created_at: {created_at}\ncentrality_rank: {row['rank']}\ncentrality_degree: {row['degree']}\n"
+            f"{extra}---\n"
         )
 
     written = {"cards_created": 0, "cards_updated": 0, "cards_skipped": 0, "files": []}
     errors = []
-    ent_dir = vault / "entities"
     ent_dir.mkdir(parents=True, exist_ok=True)
     deg_of = {r["entity"]: r for r in rows}
 
@@ -287,16 +353,22 @@ def main():
                     # 旧版无标记卡：无法区分手工内容与自动内容，保持现状不动
                     written["cards_skipped"] += 1
                     continue
-                # 受管刷新：front-matter（中心度统计随重跑变化）+ 标记区重写；
-                # 标记区外（agent 补写的散文）原样保留，created_at 沿用旧值
+                # 受管刷新：front-matter 合并式更新 —— 受管键覆写、created_at 沿用旧值、
+                # agent/用户补写的未知键（如 aliases）原样保留；标记区重写，
+                # 标记区外（agent 补写的散文）原样保留
+                if old.count(_AUTO_START) > 1 or old.count(_AUTO_END) > 1:
+                    print(f"警告: {path.name} 含多对 wiki-tree:auto 标记，仅刷新第一对，"
+                          f"其余为复制残留、内容不再更新（散文请写在标记区外）", file=sys.stderr)
                 created = _now()
-                fm_m = re.match(r"^---\n.*?\n---\n", old, re.DOTALL)
+                keep_lines = ()
+                fm_m = re.match(r"^---\n(.*?\n)---\n", old, re.DOTALL)
                 body = old
                 if fm_m:
-                    cm = re.search(r"^created_at:\s*(.+)$", fm_m.group(0), re.MULTILINE)
+                    cm = re.search(r"^created_at:\s*(.+)$", fm_m.group(1), re.MULTILINE)
                     if cm:
                         created = cm.group(1).strip()
-                    body = _front_matter(k, row, created) + old[fm_m.end():]
+                    keep_lines = _fm_unmanaged_lines(fm_m.group(1))
+                    body = _front_matter(k, e, row, created, keep_lines) + old[fm_m.end():]
                 si, ei = body.find(_AUTO_START), body.find(_AUTO_END)
                 if si == -1 or ei <= si:
                     written["cards_skipped"] += 1
@@ -306,7 +378,7 @@ def main():
                 written["cards_updated"] += 1
                 continue
             body = (
-                _front_matter(k, row, _now()) + "\n"
+                _front_matter(k, e, row, _now()) + "\n"
                 f"# {e}\n\n"
                 f"<!-- 说明：可由 Agent 补充该实体的定义/作用（1-2 句）；标记区内由 assemble_vault.py 维护、"
                 f"重跑会刷新，散文请写在标记区外。 -->\n\n"
@@ -315,8 +387,12 @@ def main():
             path.write_text(body, encoding="utf-8")
             written["cards_created"] += 1
         except OSError as exc:
-            # 个别实体名仍可能踩中文件系统限制：记入 errors 后继续，单卡失败不毁整次装配
+            # 个别实体名仍可能踩中文件系统限制：记入 errors 后继续，单卡失败不毁整次装配。
+            # 同时从已建卡集合摘除：后续卡片与 graph/index 对它回退为普通文本，
+            # 维持零悬空保证（失败前已写出的卡内若引用了它，属残余、由 errors 可见）
             errors.append({"entity": e, "file": path.name, "error": str(exc)})
+            carded_set.discard(e)
+            card_file.pop(e, None)
 
     # ---- relations/_knowledge-graph.md ----
     by_pred = defaultdict(list)
