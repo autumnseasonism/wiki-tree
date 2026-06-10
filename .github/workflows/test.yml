@@ -1,7 +1,7 @@
 # 2×2 矩阵：{Windows, Ubuntu} × {bare 裸环境, full 全依赖}
 # - bare 腿什么都不装：验证「核心纯标准库、0 安装即可用」的承诺 + 可选依赖缺失的 SKIP/退路分支
-#   （docx/pdf 转换用例 SKIP=2；kb_mcp_server 缺 SDK 的 rc=2 路径只有这条腿能执行到）
-# - full 腿装 requirements.txt：验证 docx/pdf 真实转换路径（mcp 已装 → 该用例 SKIP=1）
+#   （docx/pdf 转换用例 + kb_hub 进程内检索 SKIP=3；kb_mcp_server 缺 SDK 的 rc=2 路径只有这条腿能执行到）
+# - full 腿装 requirements.txt：验证 docx/pdf 真实转换路径与 kb_hub 进程内检索（mcp 已装 → 缺 SDK 用例 SKIP=1）
 # - EXPECT_SKIPS 把每条腿的预期跳过数钉死：依赖装错腿（缓存污染/漏装）会直接红，而不是静默少测
 name: test
 
@@ -40,5 +40,5 @@ jobs:
       - name: Run test suite
         env:
           PYTHONUTF8: "1"
-          EXPECT_SKIPS: ${{ matrix.deps == 'bare' && '2' || '1' }}
+          EXPECT_SKIPS: ${{ matrix.deps == 'bare' && '3' || '1' }}
         run: python tests/test_skill.py
