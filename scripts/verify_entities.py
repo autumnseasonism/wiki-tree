@@ -42,14 +42,14 @@ def entity_present(text: str, content: str) -> bool:
     if not text:
         return False
     if is_ascii(text):
-        # 用 (?<!\w)…(?!\w) 而非 \b…\b：既阻止 "AI" 命中 "WAIT" 这类子串，
-        # 又能正确匹配首尾为符号的实体（如 C++ / .NET），避免误杀。
-        # 已知取舍①：实体粘连更多字符时不命中（"C++" 不命中 "C++11"、".NET" 不命中 "ASP.NET"）。
-        # 已知取舍②（中文场景更常见）：纯 ASCII 实体紧贴 CJK 字符时不命中，
-        #   如 "AI的应用" 中的 "AI"、"基于RAG的系统" 中的 "RAG"——因为 Python re 把 CJK 计为 \w，
-        #   两者相邻处没有词边界，(?<!\w) 无法匹配。旧 \b 写法存在完全相同的限制。
-        #   若文档大量采用此类书写，建议在 front-matter 或实体名中显式加空格分隔。
-        return re.search(r"(?<!\w)" + re.escape(text) + r"(?!\w)", content, re.IGNORECASE) is not None
+        # 边界字符类限定为 ASCII 词字符 [A-Za-z0-9_]，而非 \w（Python re 的 \w 含 CJK）：
+        #   - 仍阻止 "AI" 命中 "WAIT"/"available" 这类英文子串误放；
+        #   - 紧贴 CJK 不再阻断匹配——"基于RAG的系统" 命中 "RAG"、"AI的应用" 命中 "AI"
+        #     （中文无空格混排是主用例的主流书写，旧 (?<!\w) 写法会把这类真实实体批量误杀）；
+        #   - 首尾为符号的实体（C++ / .NET）不受影响。
+        # 已知取舍：实体粘连更多 ASCII 词字符时不命中（"C++" 不命中 "C++11"、".NET" 不命中 "ASP.NET"）。
+        return re.search(r"(?<![A-Za-z0-9_])" + re.escape(text) + r"(?![A-Za-z0-9_])",
+                         content, re.IGNORECASE) is not None
     return text in content
 
 
@@ -61,7 +61,8 @@ def main():
         pass
     parser = argparse.ArgumentParser(description="抽取后幻觉闸门：过滤未在原文出现的实体")
     parser.add_argument("--doc", required=True, help="已转换的 .md 文档路径")
-    parser.add_argument("--entities", required=True, help="实体 JSON（{'entities':[...]} 或裸列表）")
+    parser.add_argument("--entities", required=True,
+                        help="实体 JSON **文件路径**（文件内容为 {'entities':[...]} 或裸列表；不接受内联 JSON 字符串）")
     parser.add_argument("-o", "--output", help="输出 JSON（默认 stdout）")
     args = parser.parse_args()
 
