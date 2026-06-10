@@ -117,7 +117,11 @@ def mark_from_conversion_report(data: dict, report_path: str) -> int:
     - status=success：登记源文件，doc_md 指向其自身输出。
     - status=skipped 且带 duplicate_of（内容去重副本）：登记源文件，doc_md 指向其 canonical
       文档——否则下一轮增量扫描会把这些副本当 new 重新转换（去重只在单次运行内生效）。
-    其余（error / 无 duplicate_of 的 skipped）不登记。返回登记条数。
+    其余（error / empty / 无 duplicate_of 的 skipped）不登记——empty（未提取到文本）若登记
+    done 就再没人发现内容丢了。返回登记条数。
+
+    mtime 优先用报告里 scan 时刻捕获的 modified_at（转换/抽取期间源被改时，登记时刻
+    再 stat 会拿到新 mtime → 永久误判 done）；旧报告无该字段时回退 mark_one 的当场 stat。
     """
     with open(report_path, "r", encoding="utf-8") as f:
         rep = json.load(f)
@@ -130,12 +134,13 @@ def mark_from_conversion_report(data: dict, report_path: str) -> int:
             continue
         st = d.get("status")
         if st == "success" and d.get("output"):
-            mark_one(data, src, "documents/" + Path(d["output"]).name)
+            mark_one(data, src, "documents/" + Path(d["output"]).name,
+                     mtime=d.get("modified_at"))
             n += 1
         elif st == "skipped" and d.get("duplicate_of"):
             canon = d["duplicate_of"]
             mark_one(data, src, "documents/" + Path(canon).name,
-                     doc_id=Path(canon).stem)
+                     doc_id=Path(canon).stem, mtime=d.get("modified_at"))
             n += 1
     return n
 

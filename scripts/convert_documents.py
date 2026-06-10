@@ -79,6 +79,10 @@ def convert_pdf(file_path: str) -> str:
         raise RuntimeError("缺少依赖 PyMuPDF，无法转换 .pdf：pip install PyMuPDF")
 
     doc = fitz.open(file_path)
+    # 加密 PDF：get_text 会返回空串，若不在此报错会被当成"空内容"而非明确失败
+    if doc.needs_pass:
+        doc.close()
+        raise RuntimeError("PDF 已加密（需要密码），无法提取文本")
     pages = []
 
     for page_num in range(len(doc)):
@@ -94,12 +98,16 @@ def convert_pdf(file_path: str) -> str:
 def convert_json(file_path: str) -> str:
     """JSON → Markdown"""
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
+        # utf-8-sig：带 BOM 的 JSON（Windows 工具导出常见）json.load 会直接失败；无 BOM 时等价 utf-8
+        with open(file_path, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise RuntimeError(f"JSON 解析失败: {e}") from e
 
     return json_to_markdown(data, level=2)
+
+
+JSON_LIST_CAP = 1000  # JSON 数组项数上限；超出截断并注明（导出类 JSON 动辄数万条，撑爆下游抽取）
 
 
 def json_to_markdown(obj, level=2, prefix="") -> str:
@@ -116,12 +124,14 @@ def json_to_markdown(obj, level=2, prefix="") -> str:
                 lines.append(f"**{key}**: {value}")
         lines.append("")
     elif isinstance(obj, list):
-        for i, item in enumerate(obj):
+        for i, item in enumerate(obj[:JSON_LIST_CAP]):
             if isinstance(item, (dict, list)):
                 lines.append(f"{heading} [{i}]")
                 lines.append(json_to_markdown(item, level + 1, f"{prefix}[{i}]."))
             else:
                 lines.append(f"- {item}")
+        if len(obj) > JSON_LIST_CAP:
+            lines.append(f"<!-- 列表过大：共 {len(obj)} 项，仅转换前 {JSON_LIST_CAP} 项 -->")
         lines.append("")
     else:
         lines.append(str(obj))
@@ -129,15 +139,22 @@ def json_to_markdown(obj, level=2, prefix="") -> str:
     return "\n".join(lines)
 
 
+MAX_TEXT_CHARS = 2_000_000  # 纯文本读取上限（字符）；百 MB 级 log 整读会撑爆内存与下游抽取，超出截断并注明
+
+
 def convert_text(file_path: str) -> str:
     """纯文本 → Markdown"""
+    truncated = False
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            content = f.read()
+        # utf-8-sig：剥掉可能的 BOM；无 BOM 时等价 utf-8
+        with open(file_path, "r", encoding="utf-8-sig") as f:
+            content = f.read(MAX_TEXT_CHARS)
+            truncated = bool(f.read(1))
     except UnicodeDecodeError:
         try:
             with open(file_path, "r", encoding="gbk") as f:
-                content = f.read()
+                content = f.read(MAX_TEXT_CHARS)
+                truncated = bool(f.read(1))
         except UnicodeDecodeError:
             raise RuntimeError("无法解码文件（尝试了 UTF-8 和 GBK）")
 
@@ -154,31 +171,43 @@ def convert_text(file_path: str) -> str:
     if current:
         paragraphs.append(" ".join(current))
 
-    return "\n\n".join(paragraphs)
+    result = "\n\n".join(paragraphs)
+    if truncated:
+        result += f"\n\n<!-- 文件过大，仅转换前 {MAX_TEXT_CHARS} 字符 -->"
+    return result
 
 
-CSV_ROW_CAP = 1000  # CSV 数据行上限；超出则截断并注明（避免超大表撑爆下游抽取）
+CSV_ROW_CAP = 1000   # CSV 数据行上限；超出则截断并注明（避免超大表撑爆下游抽取）
+CSV_CELL_CAP = 2000  # 单元格字符上限；超出则截断并注明（单格塞日志/base64 时与行截断同一哲学）
 
 
 def _md_cell(value) -> str:
-    """转义单元格内容，使其安全嵌入 Markdown 表格。"""
-    return (str(value).replace("\\", "\\\\").replace("|", "\\|")
+    """转义单元格内容，使其安全嵌入 Markdown 表格；超长单元格截断并注明。"""
+    s = str(value)
+    if len(s) > CSV_CELL_CAP:
+        s = f"{s[:CSV_CELL_CAP]} …（单元格过长，已截断，原 {len(s)} 字符）"
+    return (s.replace("\\", "\\\\").replace("|", "\\|")
             .replace("\r", " ").replace("\n", " ").strip())
 
 
 def convert_csv(file_path: str) -> str:
     """CSV → Markdown 表格（首行作表头；超大表截断并注明）。"""
     import csv
+    # 默认 field_size_limit=131072，单元格超长会抛 csv.Error 整文件失败；
+    # 放宽到平台上限（Windows 的 C long 为 32 位，直接给 sys.maxsize 会 OverflowError）
+    csv.field_size_limit(min(sys.maxsize, 2**31 - 1))
     rows = None
+    last_err = None
     for enc in ("utf-8-sig", "utf-8", "gbk"):
         try:
             with open(file_path, "r", encoding=enc, newline="") as f:
                 rows = list(csv.reader(f))
             break
-        except UnicodeDecodeError:
+        except (UnicodeDecodeError, csv.Error) as e:
+            last_err = e
             continue
     if rows is None:
-        raise RuntimeError("无法解码 CSV（尝试了 UTF-8 和 GBK）")
+        raise RuntimeError(f"无法解析 CSV（尝试了 UTF-8 和 GBK）: {last_err}")
     rows = [r for r in rows if any((c or "").strip() for c in r)]  # 丢弃全空行
     if not rows:
         return ""
@@ -213,12 +242,15 @@ def _existing_is_same_source(md_path: Path, source_path: str) -> bool:
     不同源文件恰好同名时（如两个目录各有 report.docx）仍走 -1 区分，互不影响。
     """
     try:
-        head = md_path.read_text(encoding="utf-8")[:800]
+        # 2000：JSON 引号格式下反斜杠翻倍，长 Windows 路径可能超出旧的 800 截断窗口
+        head = md_path.read_text(encoding="utf-8")[:2000]
     except (OSError, UnicodeDecodeError):
         return False
     # 整行匹配（带行尾 \n），避免"查询路径恰为已存路径的行前缀"的假阳性
-    # （如 /a/report 误命中存有 /a/report.docx 的卡片）
-    return f"source_path: {source_path}\n" in head
+    # （如 /a/report 误命中存有 /a/report.docx 的卡片）。
+    # 新产物 source_path 是 JSON 字符串（见 process_file），旧 vault 的裸值行也要认
+    quoted = f"source_path: {json.dumps(source_path, ensure_ascii=False)}\n"
+    return quoted in head or f"source_path: {source_path}\n" in head
 
 
 def _demote_md_frontmatter(text: str) -> str:
@@ -271,7 +303,9 @@ def process_file(file_info: dict, output_dir: Path, content_hashes: dict = None)
     try:
         if category == "markdown":
             try:
-                content = Path(source_path).read_text(encoding="utf-8")
+                # utf-8-sig：带 BOM 的源 .md 若按 utf-8 读，BOM 会挡在 "---" 前，
+                # 下方 front-matter 降级检测失效 → 双 front-matter 泄漏进正文
+                content = Path(source_path).read_text(encoding="utf-8-sig")
             except UnicodeDecodeError:
                 content = Path(source_path).read_text(encoding="gbk")
             # 源 .md 若自带 front-matter，降级为正文引用块，避免与下方注入的
@@ -287,8 +321,16 @@ def process_file(file_info: dict, output_dir: Path, content_hashes: dict = None)
                 }
             content = converter(source_path)
 
-        # 文档级内容去重：内容完全相同的文件只转换第一份（空内容不参与去重）
-        if content_hashes is not None and content.strip():
+        # 空内容不写盘：写出只剩 front-matter 的空 .md 会被登记 done，内容永久丢失且无人发现
+        if not content.strip():
+            return {
+                "status": "empty",
+                "reason": "未提取到文本，疑似扫描版 PDF/空文件",
+                "source": source_path,
+            }
+
+        # 文档级内容去重：内容完全相同的文件只转换第一份
+        if content_hashes is not None:
             digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
             if digest in content_hashes:
                 return {
@@ -296,14 +338,17 @@ def process_file(file_info: dict, output_dir: Path, content_hashes: dict = None)
                     "reason": f"内容重复，等同于 {content_hashes[digest]}",
                     "source": source_path,
                     "duplicate_of": content_hashes[digest],
+                    # scan 时刻捕获的源文件 mtime，沿管线传给 manifest 登记（见 update_manifest）
+                    "modified_at": file_info.get("modified_at"),
                 }
             content_hashes[digest] = str(output_path)
 
-        # 添加 front-matter
+        # 添加 front-matter；source_path 用 JSON 字符串（合法 YAML 标量），
+        # 路径含 " #" / ": " 等 YAML 特殊序列时不再截断/破坏整段
         now = datetime.now(timezone.utc).isoformat()
         fm = f"""---
 source_type: local_file
-source_path: {source_path}
+source_path: {json.dumps(source_path, ensure_ascii=False)}
 source_format: {file_info.get('extension', 'unknown').lstrip('.')}
 converted_at: {now}
 file_size_bytes: {file_info.get('size_bytes', 0)}
@@ -317,6 +362,8 @@ file_size_bytes: {file_info.get('size_bytes', 0)}
             "source": source_path,
             "output": str(output_path),
             "size": len(content),
+            # scan 时刻捕获的源文件 mtime，沿管线传给 manifest 登记（消除抽取期间源被改的时间窗）
+            "modified_at": file_info.get("modified_at"),
         }
 
     except Exception as e:
@@ -359,6 +406,7 @@ def main():
         "total": len(files),
         "success": 0,
         "error": 0,
+        "empty": 0,
         "skipped": 0,
         "details": [],
     }
@@ -371,6 +419,8 @@ def main():
             results["success"] += 1
         elif result["status"] == "error":
             results["error"] += 1
+        elif result["status"] == "empty":
+            results["empty"] += 1
         else:
             results["skipped"] += 1
 
@@ -379,6 +429,7 @@ def main():
             print(f"进度: {i + 1}/{len(files)} "
                   f"(成功: {results['success']}, "
                   f"错误: {results['error']}, "
+                  f"空内容: {results['empty']}, "
                   f"跳过: {results['skipped']})")
 
     # 写入转换报告
@@ -389,6 +440,7 @@ def main():
     print(f"\n转换完成！报告: {report_path}")
     print(f"  成功: {results['success']}")
     print(f"  错误: {results['error']}")
+    print(f"  空内容(未写盘，疑似扫描版 PDF/空文件): {results['empty']}")
     print(f"  跳过: {results['skipped']}")
 
 
