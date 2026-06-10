@@ -17,8 +17,14 @@ import re
 import sys
 import json
 import glob
+import math
 
 REG = os.path.expanduser("~/.knowledge-bases/registry.json")
+
+try:
+    sys.stderr.reconfigure(encoding="utf-8")  # 警告/报错含中文；stdout 是 MCP stdio 通道，不动
+except (AttributeError, ValueError):
+    pass
 
 
 def _load():
@@ -35,8 +41,33 @@ def _kb(kid):
     return None
 
 
+# CJK 单字停用字（与 kb_ingest.py 同源）：只滤单字 token，bigram 不滤
+CJK_STOP = set("的了和是在与及或该本为也都把从这那个等对之其由以并而且但即则若如因故被让给向自"
+               "至于各已未可须应要会能将就只更最不无有")
+
+
 def _toks(s):
-    return set(re.findall(r"[a-z0-9]+|[一-鿿]", (s or "").lower()))
+    """英文 [a-z0-9]+ 按词；CJK 连续段以重叠 bigram 为主、单字为辅（单字滤停用字）。
+    必须与 emit_access_bundle.py 建索引的分词严格一致，改动需三处同步（emit/kb_query/本文件）。"""
+    out = set()
+    for seg in re.findall(r"[a-z0-9]+|[一-鿿]+", (s or "").lower()):
+        if seg.isascii():
+            out.add(seg)
+        else:
+            out.update(a + b for a, b in zip(seg, seg[1:]))
+            out.update(c for c in seg if c not in CJK_STOP)
+    return out
+
+
+def _idf_score(qt, toks, df, n):
+    """交集 token 的 IDF 加权和 sum(log((N+1)/(df+1))+1)；
+    无 df（v1 旧索引 / 回退扫 extracted）时退化为每 token 权重 1.0。"""
+    hit = qt & toks
+    if not hit:
+        return 0.0
+    if not df:
+        return float(len(hit))
+    return sum(math.log((n + 1) / (df.get(t, 0) + 1)) + 1.0 for t in hit)
 
 
 def _kbjson(root):
@@ -47,24 +78,48 @@ def _kbjson(root):
     return json.load(open(p, encoding="utf-8"))
 
 
-_IDX_CACHE = {}
+_IDX_CACHE = {}  # root -> ((mtime, size), (rows, df, n))
 
 
 def _index(root, kb):
-    """加载预分词检索索引并按 root 缓存（常驻进程：首查加载、后续复用）；无则返回 None。"""
-    if root in _IDX_CACHE:
-        return _IDX_CACHE[root]
-    rel = kb.get("entrypoints", {}).get("search_index", ".wiki-tree/search-index.json")
-    p = os.path.join(root, rel)
-    rows = None
-    if os.path.exists(p):
+    """加载预分词检索索引并按 root 缓存；缓存键记录索引文件 (mtime, size)，每次 stat 比对，
+    变了即重载（常驻进程对增量重建后的库不再返回旧结果）。索引缺失、读失败、或比 extracted/
+    更旧（过期）时返回 None → 调用方回退全扫；读失败不缓存，下次重试。
+    返回 (rows, df, n)；df 为 token→文档频率，v1 旧索引无此字段时为 None。"""
+    ep = kb.get("entrypoints", {})
+    p = os.path.join(root, ep.get("search_index", ".wiki-tree/search-index.json"))
+    try:
+        st = os.stat(p)
+    except OSError:
+        _IDX_CACHE.pop(root, None)
+        return None
+    ext = os.path.join(root, ep.get("extracted_dir", ".wiki-tree/extracted/"))
+    newest = 0
+    for f in glob.glob(os.path.join(ext, "*.json")):
         try:
-            rows = [(set(r.get("tok", [])), r)
-                    for r in json.load(open(p, encoding="utf-8")).get("docs", [])]
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-            rows = None
-    _IDX_CACHE[root] = rows
-    return rows
+            m = os.path.getmtime(f)
+        except OSError:
+            continue
+        if m > newest:
+            newest = m
+    if st.st_mtime < newest:
+        sys.stderr.write("[kb-hub] %s 索引过期（extracted/ 有更新），本次回退全扫；"
+                         "请重跑 emit_access_bundle.py 刷新索引。\n" % root)
+        _IDX_CACHE.pop(root, None)
+        return None
+    key = (st.st_mtime, st.st_size)
+    hit = _IDX_CACHE.get(root)
+    if hit and hit[0] == key:
+        return hit[1]
+    try:
+        data = json.load(open(p, encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        _IDX_CACHE.pop(root, None)
+        return None
+    rows = [(set(r.get("tok", [])), r) for r in data.get("docs", []) or []]
+    val = (rows, data.get("df") or None, len(rows))
+    _IDX_CACHE[root] = (key, val)
+    return val
 
 
 def _search(root, q, top, level):
@@ -72,23 +127,25 @@ def _search(root, q, top, level):
     if not qt:
         return {"error": "empty query"}
     kb = _kbjson(root)
+    res = _index(root, kb)
+    rows, df, n = res if res is not None else (None, None, 0)
     scored = []
     for t in kb.get("topics", []):
-        sc = len(qt & _toks(t["name"] + " " + t.get("one_liner", "")))
+        sc = _idf_score(qt, _toks(t["name"] + " " + t.get("one_liner", "")), df, n)
         if sc:
             scored.append((sc, t))
     scored.sort(key=lambda x: -x[0])
     docs = []
-    rows = _index(root, kb)
     if rows is not None:
         for toks, r in rows:
-            sc = len(qt & toks)
+            sc = _idf_score(qt, toks, df, n)
             if sc:
                 it = {"doc_id": r.get("id", ""), "path": r.get("md", ""),
                       "importance": r.get("imp", 0) or 0, "short": r.get("short", "")}
                 if level in ("detailed", "full"):
                     it["detailed"] = r.get("detailed", "")
-                docs.append((sc * (0.5 + it["importance"]), it))
+                # importance 作加权小项而非乘子：避免高 imp 泛化文档碾压低 imp 相关文档
+                docs.append((sc + 0.3 * it["importance"], it))
     else:
         ext = os.path.join(root, kb["entrypoints"]["extracted_dir"])
         for f in glob.glob(os.path.join(ext, "*.json")):
@@ -96,22 +153,25 @@ def _search(root, q, top, level):
                 d = json.load(open(f, encoding="utf-8"))
             except (OSError, json.JSONDecodeError, UnicodeDecodeError):
                 continue
+            did = d.get("doc_id", "")
             blob = (d.get("short_summary", "") + " " + d.get("detailed_summary", "") + " "
-                    + " ".join((e.get("text") or "") for e in d.get("entities", [])))
-            sc = len(qt & _toks(blob))
+                    + did.replace("-", " ") + " "
+                    + " ".join(t or "" for t in d.get("topics", []) or []) + " "
+                    + " ".join((e.get("text") or "") for e in d.get("entities", []) or []))
+            sc = _idf_score(qt, _toks(blob), None, 0)
             if sc:
-                did = d.get("doc_id", "")
                 it = {"doc_id": did, "path": d.get("doc_md", "documents/%s.md" % did),
                       "importance": d.get("importance", 0) or 0, "short": d.get("short_summary", "")}
                 if level in ("detailed", "full"):
                     it["detailed"] = d.get("detailed_summary", "")
-                docs.append((sc * (0.5 + it["importance"]), it))
+                docs.append((sc + 0.3 * it["importance"], it))
     docs.sort(key=lambda x: -x[0])
     return {
         "query": q, "level": level,
         "drilldown": "L1 主题摘要(topics.summary_file) → 逐文档详细摘要(--level detailed) → L0 全文(documents 路径)",
         "topics": [{"name": t["name"], "summary_file": t["summary_file"],
-                    "one_liner": t.get("one_liner", "")} for _, t in scored[:3]],
+                    "one_liner": "(摘要尚未生成)" if t.get("summary_missing")
+                    else t.get("one_liner", "")} for _, t in scored[:3]],
         "documents": [it for _, it in docs[:top]],
         "cite_rule": "引用 documents/*.md 路径为据；库内不足再用通用知识/联网。",
     }
@@ -121,11 +181,22 @@ def _topic(root, name):
     if not (name or "").strip():
         return "请提供主题名"
     kb = _kbjson(root)
-    for t in kb.get("topics", []):
-        if t["name"] == name or _toks(name) <= _toks(t["name"]):
-            p = os.path.join(root, t["summary_file"])
-            if os.path.exists(p):
-                return open(p, encoding="utf-8").read()
+    q = name.strip()
+    qn = re.sub(r"\s+", "", q)
+    qt = _toks(q)
+    topics = kb.get("topics", [])
+    # 先精确名、再去空白归一相等，最后才用词集子集判断（bigram 防「管理」误命中含管+理二字的任意主题）
+    hits = ([t for t in topics if t["name"] == q]
+            or [t for t in topics if re.sub(r"\s+", "", t["name"]) == qn]
+            or [t for t in topics if qt and qt <= _toks(t["name"])])
+    for t in hits:
+        p = os.path.join(root, t["summary_file"])
+        if os.path.exists(p):
+            return open(p, encoding="utf-8").read()
+    if hits:
+        return ("主题「%s」的摘要尚未生成（缺 %s）。请直接读 documents/ 下相关原文，"
+                "或补写主题摘要后重跑 finalize / emit_access_bundle。"
+                % (hits[0]["name"], hits[0]["summary_file"]))
     return "未找到主题: %s" % name
 
 
@@ -140,11 +211,6 @@ def _doc(root, did, level):
         return "未找到抽取记录: " + did
     d = json.load(open(p, encoding="utf-8"))
     return d.get("detailed_summary", "") if level == "detailed" else d.get("short_summary", "")
-
-
-def _catalog():
-    kbs = _load().get("knowledge_bases", [])
-    return "、".join("%s(%s)" % (k["id"], (k.get("scope") or "")[:20]) for k in kbs) or "(空)"
 
 
 try:
@@ -164,8 +230,8 @@ def list_knowledge_bases() -> str:
         ensure_ascii=False, indent=2)
 
 
-@mcp.tool(description="在指定本地知识库里检索（四档下钻）。当前可用库：" + _catalog() +
-                     "。用法：命中某库 use_when 的问题→用其 id 调本工具；不确定先 list_knowledge_bases。"
+@mcp.tool(description="在指定本地知识库里检索（四档下钻）。"
+                     "先调 list_knowledge_bases 获取当前库列表与各自 use_when，命中某库的问题→用其 id 调本工具。"
                      "返回相关主题摘要路径+候选文档；level=short|detailed|full（detailed 附逐文档详细摘要）。"
                      "拿到后先读 topics[].summary_file，要确切数字再读 documents[].path 并引用。")
 def kb_search(kb_id: str, question: str, level: str = "short", top: int = 5) -> str:

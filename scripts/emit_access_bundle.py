@@ -25,21 +25,43 @@ def _safe(s):
 
 
 def _read_one_liner(md_path):
-    """从 summaries/topic-*.md 解析 `**一句话**：...` 行；没有则返回空串。"""
+    """从 summaries/topic-*.md 解析 `**一句话**：...` 行；
+    没有则回退取去 front-matter 后首个非标题非空段落的第一句（中英句号切）。"""
     try:
-        with open(md_path, encoding="utf-8") as f:
-            for line in f:
-                m = re.search(r"\*\*一句话\*\*[：:]\s*(.+)", line)
-                if m:
-                    return m.group(1).strip()
+        text = open(md_path, encoding="utf-8").read()
     except OSError:
-        pass
+        return ""
+    m = re.search(r"\*\*一句话\*\*[：:]\s*(.+)", text)
+    if m:
+        return m.group(1).strip()
+    body = re.sub(r"\A---\n.*?\n---\n", "", text, flags=re.S)
+    for para in re.split(r"\n\s*\n", body):
+        para = " ".join(para.split())
+        if not para or para.startswith("#"):
+            continue
+        # 英文句号只在词尾断句，避免切断 "3.5" 这类小数
+        sent = re.split(r"。|\.(?=\s|$)", para, 1)[0].strip()
+        if sent:
+            return sent
     return ""
 
 
+# CJK 单字停用字（与 kb_ingest.py 同源）：只滤单字 token，bigram 不滤
+CJK_STOP = set("的了和是在与及或该本为也都把从这那个等对之其由以并而且但即则若如因故被让给向自"
+               "至于各已未可须应要会能将就只更最不无有")
+
+
 def _toks(s):
-    """英文按词、中文按字切分（与 kb_query.py 一致），用于预分词检索索引。"""
-    return set(re.findall(r"[a-z0-9]+|[一-鿿]", (s or "").lower()))
+    """英文 [a-z0-9]+ 按词；CJK 连续段以重叠 bigram 为主、单字为辅（单字滤停用字）。
+    检索端（kb_query.py / kb_hub_server.py）分词必须与此严格一致，改动需三处同步。"""
+    out = set()
+    for seg in re.findall(r"[a-z0-9]+|[一-鿿]+", (s or "").lower()):
+        if seg.isascii():
+            out.add(seg)
+        else:
+            out.update(a + b for a, b in zip(seg, seg[1:]))
+            out.update(c for c in seg if c not in CJK_STOP)
+    return out
 
 
 def build_kb(vault, kid, name, scope, extra_use_when=None):
@@ -77,8 +99,10 @@ def build_kb(vault, kid, name, scope, extra_use_when=None):
         did = d.get("doc_id", os.path.basename(f)[:-5])
         short = d.get("short_summary", "")
         detailed = d.get("detailed_summary", "")
-        blob = short + " " + detailed + " " + " ".join(
-            (e.get("text") or "") for e in d.get("entities", []) or [])
+        # blob 纳入 doc_id（连字符还原为空格）与 topics，支持按文件名/主题词检索
+        blob = (short + " " + detailed + " " + did.replace("-", " ") + " "
+                + " ".join(t or "" for t in d.get("topics", []) or []) + " "
+                + " ".join((e.get("text") or "") for e in d.get("entities", []) or []))
         index_docs.append({
             "id": did,
             "md": d.get("doc_md", "documents/%s.md" % did),
@@ -88,9 +112,15 @@ def build_kb(vault, kid, name, scope, extra_use_when=None):
             "tok": sorted(_toks(blob)),
         })
 
-    # 写预分词检索索引：kb_query / kb_hub_server 优先用它（读 1 个文件而非扫 963 个）；
-    # 缺失时它们回退扫 extracted（向后兼容）。
-    json.dump({"version": 1, "docs": index_docs},
+    # 全库 token 文档频率（df）：检索端据此做 IDF 加权（罕见 token 权重高）
+    df = {}
+    for row in index_docs:
+        for t in row["tok"]:
+            df[t] = df.get(t, 0) + 1
+
+    # 写预分词检索索引（v2 = docs + df）：kb_query / kb_hub_server 优先用它
+    # （读 1 个文件而非扫 963 个）；缺失或 v1 旧索引（无 df）时它们自动降级。
+    json.dump({"version": 2, "df": df, "docs": index_docs},
               open(os.path.join(mw, "search-index.json"), "w", encoding="utf-8"),
               ensure_ascii=False)
 
@@ -110,11 +140,15 @@ def build_kb(vault, kid, name, scope, extra_use_when=None):
             "summary_file": "summaries/" + base,
             "one_liner": _read_one_liner(p),
         })
-    # 兜底：extracted 里出现、但没有摘要文件的主题（标准流程一般不会发生）
+    # 兜底：extracted 里出现、但没有摘要文件的主题（增量新主题在补写摘要前会短暂处于此态）；
+    # 标记 summary_missing，检索端据此提示「摘要尚未生成」而非给出悬空路径
     for k, c in topic_count.items():
         if k and k not in seen:
-            topics.append({"name": k, "docs": c,
-                           "summary_file": "summaries/topic-%s.md" % k, "one_liner": ""})
+            sf = "summaries/topic-%s.md" % k
+            t = {"name": k, "docs": c, "summary_file": sf, "one_liner": ""}
+            if not os.path.exists(os.path.join(vault, sf)):
+                t["summary_missing"] = True
+            topics.append(t)
     topics.sort(key=lambda t: -t["docs"])
 
     # use_when：通用派生（中心度 Top 实体 + 主要主题名）+ 可选领域补充词；去重保序
@@ -132,6 +166,8 @@ def build_kb(vault, kid, name, scope, extra_use_when=None):
         "name": name,
         "scope": scope,
         "use_when": use_when,
+        # 原始补充词单独留档：finalize 重跑只回灌它，不回灌派生主体（防触发面逐轮膨胀）
+        "extra_use_when": list(extra_use_when or []),
         "stats": {
             "documents": len(docs),
             "entities": cent.get("entity_count", len(cent.get("top", []))),
@@ -210,8 +246,11 @@ def main():
     json.dump(kb, open(os.path.join(vault, "kb.json"), "w", encoding="utf-8"),
               ensure_ascii=False, indent=1)
     open(os.path.join(vault, "AGENTS.md"), "w", encoding="utf-8").write(render_agents(kb))
+    # command 写当前解释器绝对路径（裸 "python" 在 MCP 宿主的 PATH 下未必可解析）；
+    # 接入包本就是本机产物（cwd 也是本机绝对路径），换机器重跑 emit 即可刷新
     mcp = {"mcpServers": {"%s-kb" % a.id: {
-        "command": "python", "args": ["kb_mcp_server.py"], "cwd": vault.replace("\\", "/")}}}
+        "command": sys.executable.replace("\\", "/"),
+        "args": ["kb_mcp_server.py"], "cwd": vault.replace("\\", "/")}}}
     json.dump(mcp, open(os.path.join(vault, ".mcp.json"), "w", encoding="utf-8"),
               ensure_ascii=False, indent=2)
     print("接入包生成完成: kb.json / AGENTS.md / .mcp.json")

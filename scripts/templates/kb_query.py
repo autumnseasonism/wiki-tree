@@ -23,6 +23,7 @@ import os
 import re
 import json
 import glob
+import math
 import argparse
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -43,9 +44,33 @@ KB = _load_kb()
 EXTRACTED = os.path.join(ROOT, KB["entrypoints"]["extracted_dir"])
 
 
+# CJK 单字停用字（与 kb_ingest.py 同源）：只滤单字 token，bigram 不滤
+CJK_STOP = set("的了和是在与及或该本为也都把从这那个等对之其由以并而且但即则若如因故被让给向自"
+               "至于各已未可须应要会能将就只更最不无有")
+
+
 def _toks(s):
-    """英文按词、中文按字切分，用于无依赖的关键词重合度打分。"""
-    return set(re.findall(r"[a-z0-9]+|[一-鿿]", (s or "").lower()))
+    """英文 [a-z0-9]+ 按词；CJK 连续段以重叠 bigram 为主、单字为辅（单字滤停用字）。
+    必须与 emit_access_bundle.py 建索引的分词严格一致，改动需三处同步（emit/本文件/kb_hub_server）。"""
+    out = set()
+    for seg in re.findall(r"[a-z0-9]+|[一-鿿]+", (s or "").lower()):
+        if seg.isascii():
+            out.add(seg)
+        else:
+            out.update(a + b for a, b in zip(seg, seg[1:]))
+            out.update(c for c in seg if c not in CJK_STOP)
+    return out
+
+
+def _idf_score(qt, toks, df, n):
+    """交集 token 的 IDF 加权和 sum(log((N+1)/(df+1))+1)；
+    无 df（v1 旧索引 / 回退扫 extracted）时退化为每 token 权重 1.0。"""
+    hit = qt & toks
+    if not hit:
+        return 0.0
+    if not df:
+        return float(len(hit))
+    return sum(math.log((n + 1) / (df.get(t, 0) + 1)) + 1.0 for t in hit)
 
 
 def _iter_extracted():
@@ -58,15 +83,32 @@ def _iter_extracted():
 
 
 def _load_index():
-    """读预分词检索索引（一次只读 1 个文件）；无则返回 None → 回退扫 extracted。"""
+    """读预分词检索索引（一次只读 1 个文件）；无或比 extracted/ 旧（过期）则返回 None → 回退全扫。
+    返回 (docs, df, n)；df 为 token→文档频率，v1 旧索引无此字段时为 None（每 token 权重 1.0）。"""
     rel = KB.get("entrypoints", {}).get("search_index", ".wiki-tree/search-index.json")
     p = os.path.join(ROOT, rel)
-    if os.path.exists(p):
-        try:
-            return json.load(open(p, encoding="utf-8")).get("docs")
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+    if not os.path.exists(p):
+        return None
+    try:
+        newest = 0
+        for f in glob.glob(os.path.join(EXTRACTED, "*.json")):
+            m = os.path.getmtime(f)
+            if m > newest:
+                newest = m
+        if os.path.getmtime(p) < newest:
+            sys.stderr.write("[kb_query] 索引过期（extracted/ 有更新），本次回退全扫；"
+                             "请重跑 emit_access_bundle.py 刷新索引。\n")
             return None
-    return None
+    except OSError:
+        pass
+    try:
+        data = json.load(open(p, encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    docs = data.get("docs")
+    if docs is None:
+        return None
+    return docs, data.get("df") or None, len(docs)
 
 
 def search(q, top=5, level="short"):
@@ -74,30 +116,34 @@ def search(q, top=5, level="short"):
     qt = _toks(q)
     if not qt:
         return {"error": "empty query"}
+    idx = _load_index()
+    rows, df, n = idx if idx is not None else (None, None, 0)
     topics = []
     for t in KB["topics"]:
-        sc = len(qt & _toks(t["name"] + " " + t.get("one_liner", "")))
+        sc = _idf_score(qt, _toks(t["name"] + " " + t.get("one_liner", "")), df, n)
         if sc:
             topics.append((sc, t))
     topics.sort(key=lambda x: -x[0])
     docs = []
-    idx = _load_index()
-    if idx is not None:
-        for r in idx:
-            sc = len(qt & set(r.get("tok", [])))
+    if rows is not None:
+        for r in rows:
+            sc = _idf_score(qt, set(r.get("tok", [])), df, n)
             if sc:
                 item = {"doc_id": r.get("id", ""), "path": r.get("md", ""),
                         "importance": r.get("imp", 0) or 0, "short": r.get("short", "")}
                 if level in ("detailed", "full"):
                     item["detailed"] = r.get("detailed", "")
-                docs.append((sc * (0.5 + item["importance"]), item))
+                # importance 作加权小项而非乘子：避免高 imp 泛化文档碾压低 imp 相关文档
+                docs.append((sc + 0.3 * item["importance"], item))
     else:
         for d in _iter_extracted():
+            did = d.get("doc_id", "")
             blob = (d.get("short_summary", "") + " " + d.get("detailed_summary", "") + " "
-                    + " ".join((e.get("text") or "") for e in d.get("entities", [])))
-            sc = len(qt & _toks(blob))
+                    + did.replace("-", " ") + " "
+                    + " ".join(t or "" for t in d.get("topics", []) or []) + " "
+                    + " ".join((e.get("text") or "") for e in d.get("entities", []) or []))
+            sc = _idf_score(qt, _toks(blob), None, 0)
             if sc:
-                did = d.get("doc_id", "")
                 item = {
                     "doc_id": did,
                     "path": d.get("doc_md", "documents/%s.md" % did),
@@ -106,14 +152,15 @@ def search(q, top=5, level="short"):
                 }
                 if level in ("detailed", "full"):
                     item["detailed"] = d.get("detailed_summary", "")
-                docs.append((sc * (0.5 + item["importance"]), item))
+                docs.append((sc + 0.3 * item["importance"], item))
     docs.sort(key=lambda x: -x[0])
     return {
         "query": q,
         "level": level,
         "drilldown": "L1 主题摘要(topics.summary_file) → 逐文档详细摘要(--level detailed) → L0 全文(documents 路径)",
         "topics": [{"name": t["name"], "summary_file": t["summary_file"],
-                    "one_liner": t.get("one_liner", "")} for _, t in topics[:3]],
+                    "one_liner": "(摘要尚未生成)" if t.get("summary_missing")
+                    else t.get("one_liner", "")} for _, t in topics[:3]],
         "documents": [it for _, it in docs[:top]],
         "cite_rule": "引用 documents/*.md 路径为据；库内不足再用通用知识/联网。",
     }
@@ -122,11 +169,21 @@ def search(q, top=5, level="short"):
 def get_topic(name):
     if not (name or "").strip():
         return "请提供主题名（用 --list-topics 查看全部）"
-    for t in KB["topics"]:
-        if t["name"] == name or _toks(name) <= _toks(t["name"]):
-            p = os.path.join(ROOT, t["summary_file"])
-            if os.path.exists(p):
-                return open(p, encoding="utf-8").read()
+    q = name.strip()
+    qn = re.sub(r"\s+", "", q)
+    qt = _toks(q)
+    # 先精确名、再去空白归一相等，最后才用词集子集判断（bigram 防「管理」误命中含管+理二字的任意主题）
+    hits = ([t for t in KB["topics"] if t["name"] == q]
+            or [t for t in KB["topics"] if re.sub(r"\s+", "", t["name"]) == qn]
+            or [t for t in KB["topics"] if qt and qt <= _toks(t["name"])])
+    for t in hits:
+        p = os.path.join(ROOT, t["summary_file"])
+        if os.path.exists(p):
+            return open(p, encoding="utf-8").read()
+    if hits:
+        return ("主题「%s」的摘要尚未生成（缺 %s）。请直接读 documents/ 下相关原文，"
+                "或补写主题摘要后重跑 finalize / emit_access_bundle。"
+                % (hits[0]["name"], hits[0]["summary_file"]))
     return "未找到主题: %s（用 --list-topics 查看全部）" % name
 
 
@@ -145,7 +202,8 @@ def get_doc(doc, level="detailed"):
 
 def get_entity(name):
     safe = "".join("-" if c in '\\/:*?"<>|' else c for c in (name or "").strip())
-    hits = glob.glob(os.path.join(ROOT, "entities", "*-" + safe + ".md"))
+    # safe 部分须 glob.escape：实体名可含 [ ] 等 glob 元字符（如「[草稿]方案」）
+    hits = glob.glob(os.path.join(ROOT, "entities", "*-" + glob.escape(safe) + ".md"))
     if hits:
         return open(hits[0], encoding="utf-8").read()
     return "未找到实体卡片: %s" % name
@@ -154,6 +212,7 @@ def get_entity(name):
 def main():
     try:
         sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")  # 警告含中文，避免 GBK 控制台/管道乱码
     except (AttributeError, ValueError):
         pass
     ap = argparse.ArgumentParser(description="通用知识树查询器（四档下钻）")
@@ -173,7 +232,12 @@ def main():
             print("%4d  %s" % (t.get("docs", 0), t["name"]))
         return
     if a.globl:
-        print(open(os.path.join(ROOT, KB["entrypoints"]["global_summary"]), encoding="utf-8").read())
+        rel = KB["entrypoints"]["global_summary"]
+        p = os.path.join(ROOT, rel)
+        if not os.path.exists(p):
+            print("未找到全局摘要: %s（L2 全局摘要尚未生成；补写后重跑 emit_access_bundle 刷新）" % rel)
+            return
+        print(open(p, encoding="utf-8").read())
         return
     if a.topic:
         print(get_topic(a.topic))
