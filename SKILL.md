@@ -4,7 +4,7 @@ description: "Turn a folder of mixed local documents into a structured personal 
 when_to_use: "User has a folder or pile of mixed local files (notes, manuals, reports, exports, PDFs, Word docs, JSON/chat dumps) that's too big to read and wants it organized, summarized, cross-linked, made searchable, or turned into a knowledge base / wiki / 第二大脑 — e.g. 文档太多帮我归纳整理、建本地知识库、把笔记变可检索、做成 agent/MCP 能查的库. Also when re-running to incrementally fold in newly added documents."
 license: MIT
 metadata:
-  version: 1.0.0
+  version: 1.0.1
   author: AI-Writing
   # 可选扩展：仅 Hermes 生态读取（tags 做发现、related_skills 做关联）；Anthropic / Claude Code 等其他运行时忽略，删除不影响功能。
   hermes:
