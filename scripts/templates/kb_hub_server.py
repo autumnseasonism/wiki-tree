@@ -83,8 +83,8 @@ _IDX_CACHE = {}  # root -> ((mtime, size), (rows, df, n))
 
 def _index(root, kb):
     """加载预分词检索索引并按 root 缓存；缓存键记录索引文件 (mtime, size)，每次 stat 比对，
-    变了即重载（常驻进程对增量重建后的库不再返回旧结果）。索引缺失、读失败、或比 extracted/
-    更旧（过期）时返回 None → 调用方回退全扫；读失败不缓存，下次重试。
+    变了即重载（常驻进程对增量重建后的库不再返回旧结果）。索引缺失、读失败、比 extracted/
+    更旧、或文档数与 extracted/ 不符（删除方向）时返回 None → 调用方回退全扫；读失败不缓存，下次重试。
     返回 (rows, df, n)；df 为 token→文档频率，v1 旧索引无此字段时为 None。"""
     ep = kb.get("entrypoints", {})
     p = os.path.join(root, ep.get("search_index", ".wiki-tree/search-index.json"))
@@ -94,8 +94,9 @@ def _index(root, kb):
         _IDX_CACHE.pop(root, None)
         return None
     ext = os.path.join(root, ep.get("extracted_dir", ".wiki-tree/extracted/"))
+    files = glob.glob(os.path.join(ext, "*.json"))
     newest = 0
-    for f in glob.glob(os.path.join(ext, "*.json")):
+    for f in files:
         try:
             m = os.path.getmtime(f)
         except OSError:
@@ -110,16 +111,31 @@ def _index(root, kb):
     key = (st.st_mtime, st.st_size)
     hit = _IDX_CACHE.get(root)
     if hit and hit[0] == key:
-        return hit[1]
-    try:
-        data = json.load(open(p, encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        val = hit[1]
+    else:
+        try:
+            data = json.load(open(p, encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            _IDX_CACHE.pop(root, None)
+            return None
+        rows = [(set(r.get("tok", [])), r) for r in data.get("docs", []) or []]
+        val = (rows, data.get("df") or None, len(rows))
+        _IDX_CACHE[root] = (key, val)
+    # 过期的「删除」方向：回滚等删 extracted 文件不会推高最大 mtime，按文档数不符兜底
+    if len(files) != val[2]:
+        sys.stderr.write("[kb-hub] %s 索引过期（extracted/ 文档数与索引不符），本次回退全扫；"
+                         "请重跑 emit_access_bundle.py 刷新索引。\n" % root)
         _IDX_CACHE.pop(root, None)
         return None
-    rows = [(set(r.get("tok", [])), r) for r in data.get("docs", []) or []]
-    val = (rows, data.get("df") or None, len(rows))
-    _IDX_CACHE[root] = (key, val)
     return val
+
+
+def _fmt_topic(root, t):
+    """summary_missing 是 emit 时刻快照：摘要可能在 emit 后已补写，输出前实查一次文件，
+    已存在则照常输出（与 _topic 的动态检查口径一致；仅对 scored[:3] 调用，开销可忽略）。"""
+    missing = t.get("summary_missing") and not os.path.exists(os.path.join(root, t["summary_file"]))
+    return {"name": t["name"], "summary_file": t["summary_file"],
+            "one_liner": "(摘要尚未生成)" if missing else t.get("one_liner", "")}
 
 
 def _search(root, q, top, level):
@@ -169,9 +185,7 @@ def _search(root, q, top, level):
     return {
         "query": q, "level": level,
         "drilldown": "L1 主题摘要(topics.summary_file) → 逐文档详细摘要(--level detailed) → L0 全文(documents 路径)",
-        "topics": [{"name": t["name"], "summary_file": t["summary_file"],
-                    "one_liner": "(摘要尚未生成)" if t.get("summary_missing")
-                    else t.get("one_liner", "")} for _, t in scored[:3]],
+        "topics": [_fmt_topic(root, t) for _, t in scored[:3]],
         "documents": [it for _, it in docs[:top]],
         "cite_rule": "引用 documents/*.md 路径为据；库内不足再用通用知识/联网。",
     }

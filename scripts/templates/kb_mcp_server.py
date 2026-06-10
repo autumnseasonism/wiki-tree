@@ -29,6 +29,37 @@ except Exception:  # noqa: BLE001
     sys.exit(2)
 
 KB = kb_query.KB
+_KB_PATH = os.path.join(ROOT, "kb.json")
+
+
+def _kb_key():
+    try:
+        st = os.stat(_KB_PATH)
+        return (st.st_mtime, st.st_size)
+    except OSError:
+        return None
+
+
+_KB_KEY = _kb_key()
+
+
+def _refresh():
+    """kb.json (mtime,size) 变化时重读并赋回 kb_query.KB / EXTRACTED——常驻进程对增量
+    emit 重写后的库不再返回旧主题表（与 kb_hub_server 的失效策略对齐）。每个 tool 入口先调本函数。
+    注：kb_search 的 description（含 use_when 文案）在装饰器求值时已冻结，刷新不覆盖它，可接受。"""
+    global KB, _KB_KEY
+    key = _kb_key()
+    if key is None or key == _KB_KEY:
+        return
+    try:
+        kb = kb_query._load_kb()
+    except (SystemExit, ValueError, OSError):
+        return  # 读失败（被删/写一半等）：保留旧 KB 继续服务，下次调用重试
+    KB = kb_query.KB = kb
+    kb_query.EXTRACTED = os.path.join(kb_query.ROOT, kb["entrypoints"]["extracted_dir"])
+    _KB_KEY = key
+
+
 _SCOPE = "、".join(KB.get("use_when", [])[:10])
 mcp = FastMCP(KB.get("name", "knowledge-base"))
 
@@ -42,24 +73,28 @@ _SEARCH_DESC = (
 
 @mcp.tool(description=_SEARCH_DESC)
 def kb_search(question: str, level: str = "short", top: int = 5) -> str:
+    _refresh()
     return json.dumps(kb_query.search(question, top, level), ensure_ascii=False, indent=2)
 
 
 @mcp.tool()
 def kb_topic(name: str) -> str:
     """获取某个主题的完整 L1 摘要（已把该主题全部文档汇总好）。用 kb_list_topics 看可选主题。"""
+    _refresh()
     return kb_query.get_topic(name)
 
 
 @mcp.tool()
 def kb_document(doc_id: str, level: str = "detailed") -> str:
     """读某篇文档：level=short(1-2句) | detailed(逐文档详细摘要) | full(L0 原文)。"""
+    _refresh()
     return kb_query.get_doc(doc_id, level)
 
 
 @mcp.tool()
 def kb_list_topics() -> str:
     """列出全部主题及其文档数与一句话摘要。"""
+    _refresh()
     return json.dumps([
         {"name": t["name"], "docs": t.get("docs", 0), "one_liner": t.get("one_liner", "")}
         for t in KB.get("topics", [])

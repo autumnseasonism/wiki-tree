@@ -21,23 +21,27 @@ import argparse
 
 
 def _safe(s):
-    return "".join("-" if c in '\\/:*?"<>|' else c for c in (s or "").strip())
+    # 字符集与 assemble_vault._safe 一致（含换行/制表符）；不做长度截断——主题名场景不需要
+    return "".join("-" if c in '\\/:*?"<>|\n\r\t' else c for c in (s or "").strip())
 
 
 def _read_one_liner(md_path):
     """从 summaries/topic-*.md 解析 `**一句话**：...` 行；
     没有则回退取去 front-matter 后首个非标题非空段落的第一句（中英句号切）。"""
     try:
-        text = open(md_path, encoding="utf-8").read()
+        # utf-8-sig：BOM 会挡在 "---" 前使 front-matter 剥离失效（与 convert_documents 口径一致）
+        text = open(md_path, encoding="utf-8-sig").read()
     except OSError:
         return ""
     m = re.search(r"\*\*一句话\*\*[：:]\s*(.+)", text)
     if m:
         return m.group(1).strip()
-    body = re.sub(r"\A---\n.*?\n---\n", "", text, flags=re.S)
+    # 结尾允许 \Z：文件恰以 "---" 结尾（无尾换行）时也能剥离 front-matter
+    body = re.sub(r"\A---\n.*?\n---\s*(?:\n|\Z)", "", text, flags=re.S)
     for para in re.split(r"\n\s*\n", body):
         para = " ".join(para.split())
-        if not para or para.startswith("#"):
+        # 纯符号段（如水平分割线 ---）不是句子，跳过
+        if not para or para.startswith("#") or re.fullmatch(r"[-*_=\s]+", para):
             continue
         # 英文句号只在词尾断句，避免切断 "3.5" 这类小数
         sent = re.split(r"。|\.(?=\s|$)", para, 1)[0].strip()

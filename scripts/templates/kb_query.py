@@ -89,12 +89,16 @@ def _load_index():
     p = os.path.join(ROOT, rel)
     if not os.path.exists(p):
         return None
-    try:
-        newest = 0
-        for f in glob.glob(os.path.join(EXTRACTED, "*.json")):
+    files = glob.glob(os.path.join(EXTRACTED, "*.json"))
+    newest = 0
+    for f in files:
+        try:
             m = os.path.getmtime(f)
-            if m > newest:
-                newest = m
+        except OSError:  # 单文件竞态（如并发回滚刚删）：跳过该文件，不放弃整个校验
+            continue
+        if m > newest:
+            newest = m
+    try:
         if os.path.getmtime(p) < newest:
             sys.stderr.write("[kb_query] 索引过期（extracted/ 有更新），本次回退全扫；"
                              "请重跑 emit_access_bundle.py 刷新索引。\n")
@@ -108,7 +112,20 @@ def _load_index():
     docs = data.get("docs")
     if docs is None:
         return None
+    # 过期的「删除」方向：回滚等删 extracted 文件不会推高最大 mtime，按文档数不符兜底
+    if len(files) != len(docs):
+        sys.stderr.write("[kb_query] 索引过期（extracted/ 文档数与索引不符），本次回退全扫；"
+                         "请重跑 emit_access_bundle.py 刷新索引。\n")
+        return None
     return docs, data.get("df") or None, len(docs)
+
+
+def _fmt_topic(t):
+    """summary_missing 是 emit 时刻快照：摘要可能在 emit 后已补写，输出前实查一次文件，
+    已存在则照常输出（与 get_topic 的动态检查口径一致；仅对 topics[:3] 调用，开销可忽略）。"""
+    missing = t.get("summary_missing") and not os.path.exists(os.path.join(ROOT, t["summary_file"]))
+    return {"name": t["name"], "summary_file": t["summary_file"],
+            "one_liner": "(摘要尚未生成)" if missing else t.get("one_liner", "")}
 
 
 def search(q, top=5, level="short"):
@@ -158,9 +175,7 @@ def search(q, top=5, level="short"):
         "query": q,
         "level": level,
         "drilldown": "L1 主题摘要(topics.summary_file) → 逐文档详细摘要(--level detailed) → L0 全文(documents 路径)",
-        "topics": [{"name": t["name"], "summary_file": t["summary_file"],
-                    "one_liner": "(摘要尚未生成)" if t.get("summary_missing")
-                    else t.get("one_liner", "")} for _, t in topics[:3]],
+        "topics": [_fmt_topic(t) for _, t in topics[:3]],
         "documents": [it for _, it in docs[:top]],
         "cite_rule": "引用 documents/*.md 路径为据；库内不足再用通用知识/联网。",
     }
@@ -201,11 +216,17 @@ def get_doc(doc, level="detailed"):
 
 
 def get_entity(name):
-    safe = "".join("-" if c in '\\/:*?"<>|' else c for c in (name or "").strip())
+    # 字符集与 assemble_vault._safe 一致（含换行/制表符）；不做长度截断——查询场景不需要
+    safe = "".join("-" if c in '\\/:*?"<>|\n\r\t' else c for c in (name or "").strip())
     # safe 部分须 glob.escape：实体名可含 [ ] 等 glob 元字符（如「[草稿]方案」）
     hits = glob.glob(os.path.join(ROOT, "entities", "*-" + glob.escape(safe) + ".md"))
     if hits:
         return open(hits[0], encoding="utf-8").read()
+    # 兜底：碰撞 -2/-3 后缀、超长名截断+哈希（见 assemble_vault._safe）会使精确名不可命中，
+    # 放宽为子串匹配；命中多个取字典序第一个，并在首行注明实际匹配的文件
+    hits = sorted(glob.glob(os.path.join(ROOT, "entities", "*-" + glob.escape(safe) + "*.md")))
+    if hits:
+        return "[匹配文件: %s]\n" % os.path.basename(hits[0]) + open(hits[0], encoding="utf-8").read()
     return "未找到实体卡片: %s" % name
 
 
