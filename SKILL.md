@@ -3,7 +3,7 @@ name: wiki-tree
 description: "Turn a folder of mixed local documents (Word/PDF/Markdown/JSON/CSV/text) into a structured knowledge base — an Obsidian-compatible vault that humans browse and any AI agent can query. Use whenever the user wants to 把资料/文档整理成知识库、建 Obsidian wiki/vault、扫描文件夹提取知识、把一堆文档/笔记做成可浏览可检索的知识库、给文档建索引、做成 agent 能查询的本地知识库/第二大脑 — or points at a local folder of mixed documents and wants it organized, summarized, searchable or queryable, even without saying 'Obsidian' or 'wiki'; also when re-running to incrementally fold in newly added documents. Not for editing one file, web scraping, or building a website."
 license: MIT
 metadata:
-  version: 1.0.1
+  version: 1.1.0
   author: AI-Writing
   # 仅 Hermes 生态读取；其他运行时忽略。
   hermes:
