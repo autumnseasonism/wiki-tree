@@ -100,9 +100,12 @@ def install_hook(hook_file, block):
     if _BEGIN_TAG in old:
         bi = old.index(_BEGIN_TAG)
         ei = old.find(END, bi)
-        if ei < 0:
-            # 孤立 BEGIN（其后无配对 END，含 END 只出现在 BEGIN 之前）：若此时走追加分支，
-            # 下次替换会把孤立 BEGIN 到新块 END 之间的用户内容整段吞掉 → 必须拒绝改写。
+        # 孤立 BEGIN 两种排列都必须拒绝改写：
+        #   ① 其后无任何 END（ei<0）；
+        #   ② BEGIN 与找到的 END 之间又出现一个 BEGIN——说明该 END 配对的是后面那个
+        #      完整块，当前 BEGIN 实为孤立（旧版在孤立 BEGIN 文件上追加过一次就会留下
+        #      这种「孤立BEGIN…用户内容…BEGIN…END」存量），整段替换会吞掉中间的用户内容。
+        if ei < 0 or old.find(_BEGIN_TAG, bi + len(_BEGIN_TAG), ei) >= 0:
             print("错误：%s 中存在孤立的 KB-HUB BEGIN 标记（其后找不到配对的 %s）。\n"
                   "  为避免后续替换吞掉标记之间的内容，本次未改写该文件；"
                   "请手动删除孤立标记（或补上配对 END）后重跑 --install-hook。"
@@ -116,7 +119,14 @@ def install_hook(hook_file, block):
         return  # 内容未变（幂等重跑）：不写盘也不产生备份
     # 改写的是用户的全局指令文件：先留备份，再原子替换
     if os.path.exists(hook_file):
-        shutil.copy2(hook_file, hook_file + ".bak-" + datetime.now().strftime("%Y%m%d-%H%M%S"))
+        base = hook_file + ".bak-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+        # 秒级时间戳同一秒内会碰撞（如脚本循环对多个 vault 连跑 --install-hook）：
+        # 已存在则追加 -2/-3 序号，绝不覆盖更早的快照——最早一份恰是最有价值的。
+        bak, n = base, 2
+        while os.path.exists(bak):
+            bak = "%s-%d" % (base, n)
+            n += 1
+        shutil.copy2(hook_file, bak)
     _atomic_write(hook_file, new)
 
 

@@ -420,7 +420,9 @@ def _residues(vault, basename, keep=()):
             if md.resolve() in keep_rs:
                 continue
             try:
-                head = md.read_text(encoding="utf-8", errors="ignore")[:600]
+                # 2000：与 convert_documents._existing_is_same_source 同口径——
+                # JSON 引号格式下反斜杠翻倍，长 Windows 路径会超出旧的 600 截断窗口
+                head = md.read_text(encoding="utf-8", errors="ignore")[:2000]
             except OSError:
                 continue
             m = re.search(r"^source_path:[ \t]*(.+)$", head, re.M)
@@ -453,7 +455,7 @@ def rollback(vault, basename):
         except OSError:
             pass
     # best-effort：从转换报告映射 inbox 源 → 产物 doc-md（convert_documents 写的容器键是 details）
-    doc_md, dup_of = None, None
+    doc_md, dup_of, entries = None, None, []
     rep = Path(vault) / "_conversion_report.json"
     if rep.exists():
         try:
@@ -478,8 +480,23 @@ def rollback(vault, basename):
         print("  （%s 为内容重复件，无独立产物；保留 canonical: %s）" % (basename, dup_of))
     else:
         stem = Path(doc_md).stem if doc_md else Path(basename).stem
-        for cand in [Path(vault) / "documents" / (stem + ".md"),
-                     mw / "extracted" / (stem + ".json")]:
+        doc_path = Path(vault) / "documents" / (stem + ".md")
+        # dup 保护的反向连带：本文件可能是其他重复件的 canonical——删它的 md 后，
+        # 报告里 duplicate_of 指向它的重复件登记会悬空（manifest 仍为 done、inbox
+        # 副本不会被重扫，内容静默消失）。只提示不阻断：需用户决定一并回滚
+        # 或重置那些重复件的 manifest 条目使其下轮重新转换。
+        if doc_path.exists():
+            dups = [e.get("source") or e.get("source_path") or e.get("path") or "?"
+                    for e in entries or []
+                    if e.get("status") == "skipped" and e.get("duplicate_of")
+                    and Path(e["duplicate_of"]).name == doc_path.name]
+            if dups:
+                print("警告：以下内容重复件的 duplicate_of 指向即将删除的 %s，"
+                      "删除后其登记将失去内容来源；请一并回滚，或重置其 manifest 条目："
+                      % doc_path.name, file=sys.stderr)
+                for d in dups:
+                    print("  ! %s" % d, file=sys.stderr)
+        for cand in [doc_path, mw / "extracted" / (stem + ".json")]:
             if cand.exists():
                 try:
                     cand.unlink()
@@ -640,8 +657,10 @@ def main():
         if leftovers:
             print("回滚不彻底：仍有 %d 处产物指向 %s（见上方警告），请手动核对后再 --finalize"
                   % (len(leftovers), a.rollback), file=sys.stderr)
-        else:
-            print("已回滚暂存: %s（如需重建，跑 --finalize --kb %s）" % (a.rollback, a.kb))
+            # 脚本/agent 消费方以 rc 为准：rc=0 会被误判成功、随后照跑 --finalize
+            # 把残留重新送进图谱——必须响亮失败。
+            sys.exit(1)
+        print("已回滚暂存: %s（如需重建，跑 --finalize --kb %s）" % (a.rollback, a.kb))
         return
 
     if not a.paths:
