@@ -3,7 +3,7 @@
 wiki-tree 回归测试套件。
 运行: python tests/test_skill.py   （建议先 set PYTHONUTF8=1 / export PYTHONUTF8=1）
      或 python -m pytest tests/test_skill.py（经文件末尾的桥接用例收集）
-覆盖 10 个脚本 + 3 个接入包模板的核心行为 + 历次修复：
+覆盖 10 个脚本 + 4 个接入包模板的核心行为 + 历次修复：
   管线: scan_folder / generate_wiki_structure / convert_documents / update_manifest /
         verify_entities / compute_centrality / assemble_vault / suggest_dedup
   接入: emit_access_bundle / kb_register / templates(kb_query · kb_ingest · kb_mcp_server · kb_hub_server)
@@ -105,7 +105,8 @@ def main():
 
         with sect("[2] generate_wiki_structure"):
             v = W / "vault"; run(SC / "generate_wiki_structure.py", "--output", v)
-            for dd in ("documents", "summaries", "entities", "relations", ".obsidian", ".wiki-tree/extracted"):
+            for dd in ("documents", "summaries", "entities", "relations", ".obsidian",
+                       ".wiki-tree/extracted", ".wiki-tree/tmp"):
                 check(f"目录 {dd}", (v / dd).is_dir())
             check("空 manifest", jload(v / ".wiki-tree/manifest.json")["processed"] == {})
             idx = v / "_index.md"; idx.write_text(idx.read_text(encoding="utf-8") + "\nKEEP\n", encoding="utf-8")
@@ -472,6 +473,15 @@ def main():
             ra5 = jload_str(run(SC / "assemble_vault.py", "--vault", av).stdout)
             check("中14: 无标记旧卡跳过不覆盖",
                   legacy_card.read_text(encoding="utf-8") == "# 概念C\n纯手工内容\n" and ra5["cards_skipped"] == 1, ra5)
+            # M7/M5: front-matter 合并式更新——未知键(aliases)保留、entity 身份键存在
+            card_fm = av / "entities/project-项目P.md"
+            txt_fm = card_fm.read_text(encoding="utf-8")
+            check("M5: 卡片 front-matter 含 entity 身份键", re.search(r"^entity:", txt_fm, re.M) is not None)
+            card_fm.write_text(txt_fm.replace("---\n", "---\naliases:\n  - 别名AAA\n", 1), encoding="utf-8")
+            run(SC / "assemble_vault.py", "--vault", av)
+            t_fm2 = card_fm.read_text(encoding="utf-8")
+            check("M7: 受管刷新保留未知 front-matter 键(aliases)",
+                  "别名AAA" in t_fm2 and "centrality_rank" in t_fm2, t_fm2[:200])
 
         with sect("[14] suggest_dedup"):
             sv = W / "sv"; (sv / ".wiki-tree/extracted").mkdir(parents=True)
@@ -544,10 +554,13 @@ def main():
             (av / "entities/00-[草稿]方案.md").write_text("# [草稿]方案\n", encoding="utf-8")
             eo = run(av / "kb_query.py", "--entity", "[草稿]方案").stdout
             check("低12: --entity 名含[ ]元字符可命中", "[草稿]方案" in eo and "未找到" not in eo, eo[:60])
-            rg = run(av / "kb_query.py", "--global")
-            check("query: --global 取 L2 全局摘要", rg.returncode == 0 and rg.stdout.strip() != "")
             gs = av / "summaries/_global-summary.md"
-            gbak = gs.read_text(encoding="utf-8"); gs.unlink()
+            gbak = gs.read_text(encoding="utf-8")
+            rg = run(av / "kb_query.py", "--global")
+            check("query: --global 取 L2 全局摘要（输出即文件内容）",
+                  rg.returncode == 0 and gbak.strip()[:20] in rg.stdout
+                  and "未找到全局摘要" not in rg.stdout, (rg.stdout or "")[:80])
+            gs.unlink()
             rg2 = run(av / "kb_query.py", "--global")
             check("中21: --global 缺文件 → 友好提示非 traceback",
                   rg2.returncode == 0 and "未找到全局摘要" in rg2.stdout, (rg2.stdout or "")[:80])
@@ -565,6 +578,17 @@ def main():
             q15f = jload_str(run(av / "kb_query.py", "工具T 概念", "--json").stdout)
             check("query: 无索引回退扫 extracted 结果一致",
                   bool(q15f["documents"]) and q15f["documents"][0]["path"] == "documents/doc1.md")
+            # 高4: v1 旧索引（单字 tok、无 df）向后兼容是文档化承诺
+            (av / ".wiki-tree/search-index.json").write_text(json.dumps({
+                "version": 1,
+                "docs": [{"id": "doc1", "md": "documents/doc1.md", "imp": 0.9, "short": "文档一概要",
+                          "tok": ["工", "具", "t", "概", "念"]},
+                         {"id": "doc2", "md": "documents/doc2.md", "imp": 0.5, "short": "文档二概要",
+                          "tok": ["工", "具", "t", "概", "念", "c"]}]}, ensure_ascii=False), encoding="utf-8")
+            rv1 = run(av / "kb_query.py", "工具T 概念", "--json")
+            check("高4: v1 旧索引向后兼容（无 df 退化等权重）",
+                  jload_str(rv1.stdout)["documents"][0]["path"] == "documents/doc1.md"
+                  and "索引过期" not in (rv1.stderr or ""), (rv1.stderr or "")[:60])
             # 中18: 增量引入新主题但无摘要文件 → summary_missing 提示而非悬空 404
             (av / ".wiki-tree/extracted/doc3.json").write_text(json.dumps({
                 "doc_id": "doc3", "doc_md": "documents/doc3.md", "short_summary": "文档三概要",
@@ -597,6 +621,22 @@ def main():
                       hres["documents"][:2])
                 check("中19: 缓存键为 (mtime,size) 元组", isinstance(hub._IDX_CACHE[str(av)][0], tuple))
                 check("hub: --topic 乱序不误命中", "未找到主题" in hub._topic(str(av), "甲题"))
+                # M14: 索引重建后缓存按 (mtime,size) 失效——新文档在常驻进程内立即可检索
+                (av / ".wiki-tree/extracted/doc4.json").write_text(json.dumps({
+                    "doc_id": "doc4", "doc_md": "documents/doc4.md", "short_summary": "独特词汇甲乙丙丁",
+                    "importance": 0.5, "topics": ["主题甲"], "entities": [], "relations": []},
+                    ensure_ascii=False), encoding="utf-8")
+                run(SC / "emit_access_bundle.py", "--vault", av, "--id", "t", "--name", "测试库",
+                    "--scope", "用于测试的知识库", "--extra-use-when", "额外词")
+                h2 = hub._search(str(av), "独特词汇", 5, "short")
+                idxp = av / ".wiki-tree/search-index.json"
+                check("M14: 索引重建后 hub 缓存失效、新文档可检索",
+                      any(d["path"] == "documents/doc4.md" for d in h2["documents"])
+                      and hub._IDX_CACHE[str(av)][0] == (os.path.getmtime(idxp), os.path.getsize(idxp)),
+                      h2["documents"][:2])
+                (av / ".wiki-tree/extracted/doc4.json").unlink()
+                run(SC / "emit_access_bundle.py", "--vault", av, "--id", "t", "--name", "测试库",
+                    "--scope", "用于测试的知识库", "--extra-use-when", "额外词")
             else:
                 rm = run(av / "kb_mcp_server.py", ok=False)
                 check("mcp_server: 缺 SDK → rc=2 + 提示 CLI 兜底",
@@ -653,6 +693,16 @@ def main():
                   ro.returncode == 1 and "孤立" in ro.stderr
                   and "用户被夹内容" in hook_o.read_text(encoding="utf-8")
                   and "<!-- KB-HUB:END -->" not in hook_o.read_text(encoding="utf-8"), (ro.stderr or "")[:100])
+            # M10: 存量损坏排列「孤立BEGIN…用户内容…完整BEGIN…END」同样拒绝改写（旧版升级遗留态）
+            hook_m = W / "hook_m.md"
+            hook_m.write_text("<!-- KB-HUB:BEGIN auto-managed by wiki-tree -->\n必须存活的内容\n"
+                              "<!-- KB-HUB:BEGIN auto-managed by wiki-tree -->\nblock\n<!-- KB-HUB:END -->\n",
+                              encoding="utf-8")
+            rm16 = run(SC / "kb_register.py", "--vault", av, "--registry", W / "reg_m.json",
+                       "--hook-file", hook_m, "--install-hook", ok=False)
+            check("M10: 孤立BEGIN+完整块排列 → rc=1 + 夹层内容存活",
+                  rm16.returncode == 1 and "必须存活的内容" in hook_m.read_text(encoding="utf-8"),
+                  (rm16.stderr or "")[:100])
 
         with sect("[17] kb_ingest（假 HOME，不触碰真实 ~/.knowledge-bases）"):
             KI = SC / "templates/kb_ingest.py"
@@ -703,9 +753,9 @@ def main():
             rb3 = run(KI, f_sp, "--kb", "b2", "--yes", "--build", "--json", env=henv)
             jload_str(rb3.stdout)
             (vb / "_conversion_report.json").unlink()
-            rb4 = run(KI, "--rollback", "会议纪要 2026.md", "--kb", "b2", env=henv)
-            check("高6: 无报告且 stem 失配 → 残留警告 + 不打成功行",
-                  "警告" in (rb4.stderr or "") and "会议纪要-2026.md" in (rb4.stderr or "")
+            rb4 = run(KI, "--rollback", "会议纪要 2026.md", "--kb", "b2", env=henv, ok=False)
+            check("高6: 无报告且 stem 失配 → 残留警告 + 非零退出码（消费方可感知）",
+                  rb4.returncode != 0 and "警告" in (rb4.stderr or "") and "会议纪要-2026.md" in (rb4.stderr or "")
                   and "回滚不彻底" in (rb4.stderr or "") and "已回滚暂存" not in rb4.stdout,
                   (rb4.stderr or "")[:160])
             if doc_sp.exists():
@@ -781,6 +831,15 @@ def main():
             run(SC / "update_manifest.py", "--vault", ev2, "--from-conversion-report", ev2 / "_conversion_report.json")
             check("中11: empty 不登记 manifest（下一轮仍可重试）",
                   jload(ev2 / ".wiki-tree/manifest.json")["processed"] == {})
+            # 评审low: 已转换成功的源后来被清空 → empty 分支删除旧同源产物（陈旧内容不再被索引）
+            es = W / "es"; es.mkdir(); esf = es / "doc.txt"; esf.write_text("原始内容", encoding="utf-8")
+            repes = W / "es.json"
+            repes.write_text(json.dumps(report([(str(esf), "text")]), ensure_ascii=False), encoding="utf-8")
+            ev3 = W / "ev3"; run(SC / "convert_documents.py", "--scan-report", repes, "--output", ev3)
+            check("前置: 首轮转换成功", (ev3 / "documents/doc.md").exists())
+            esf.write_text("   ", encoding="utf-8")
+            run(SC / "convert_documents.py", "--scan-report", repes, "--output", ev3)
+            check("评审: 源清空后 empty 分支删除旧同源产物", not (ev3 / "documents/doc.md").exists())
 
         with sect("[19] convert: mtime 沿管线 + source_path YAML 转义"):
             # 中13: 登记的 mtime = 扫描时刻而非登记时刻（抽取期间改文件不再被吞）
@@ -823,6 +882,22 @@ def main():
             repl.write_text(json.dumps(report([(str(lsrc), "markdown")]), ensure_ascii=False), encoding="utf-8")
             run(SC / "convert_documents.py", "--scan-report", repl, "--output", ov)
             check("低3: 旧裸值行仍判同源（无 legacy-1.md）", not list((ov / "documents").glob("legacy-1.md")))
+            # M2(#25): 不同源同名 → -1 防碰撞正面用例（该分支历史上修过假阳性，回归即静默覆盖）
+            da = W / "da"; da.mkdir(); (da / "report.md").write_text("内容甲", encoding="utf-8")
+            db = W / "db"; db.mkdir(); (db / "report.md").write_text("内容乙", encoding="utf-8")
+            repdd = W / "dd2.json"
+            repdd.write_text(json.dumps(report([(str(da / "report.md"), "markdown"),
+                                                (str(db / "report.md"), "markdown")]), ensure_ascii=False), encoding="utf-8")
+            dv2 = W / "dv2"; run(SC / "convert_documents.py", "--scan-report", repdd, "--output", dv2)
+            r0 = dv2 / "documents/report.md"; r1 = dv2 / "documents/report-1.md"
+            t0 = r0.read_text(encoding="utf-8") if r0.exists() else ""
+            t1 = r1.read_text(encoding="utf-8") if r1.exists() else ""
+            check("M2: 不同源同名 → report.md + report-1.md 并存且内容互不覆盖",
+                  r0.exists() and r1.exists()
+                  and (("内容甲" in t0 and "内容乙" in t1) or ("内容乙" in t0 and "内容甲" in t1)),
+                  (t0[:40], t1[:40]))
+            run(SC / "convert_documents.py", "--scan-report", repdd, "--output", dv2)
+            check("M2: 重跑幂等无 report-2.md", not (dv2 / "documents/report-2.md").exists())
 
         with sect("[20] scan: 嵌套 vault 剪枝 + 内置剪枝可见化 + 孤儿"):
             # 高5: vault 嵌在扫描目标内 → 剪枝防自回灌
@@ -862,6 +937,22 @@ def main():
             run(SC / "scan_folder.py", ms2, "--vault", mvt2, "-o", W / "or3.json")
             check("低17: 同名目录顶替源文件仍判孤儿（isfile 判定）",
                   jload(W / "or3.json")["orphaned_count"] == 1)
+            # M3: vault==target（就地建库）——vault_is_target + 产物子目录剪枝
+            vt = W / "vt"; run(SC / "generate_wiki_structure.py", "--output", vt)
+            (vt / "src.md").write_text("# 源", encoding="utf-8")
+            (vt / "documents/prev.md").write_text("# 上一轮产物", encoding="utf-8")
+            run(SC / "scan_folder.py", vt, "--vault", vt, "-o", W / "vt.json")
+            dvt = jload(W / "vt.json")
+            check("M3: vault==target → vault_is_target + 产物目录剪枝",
+                  dvt.get("vault_is_target") is True and "prev.md" not in {f["name"] for f in dvt["files"]}
+                  and dvt["supported_files"] == 1, dvt.get("supported_files"))
+            # 评审low: 升级前自回灌进 manifest 的 vault 内路径 → stale_in_vault 可见
+            run(SC / "update_manifest.py", "--vault", nv / "vault",
+                "--mark", str(nv / "vault" / "documents" / "prev.md"), "--doc-md", "documents/prev.md")
+            run(SC / "scan_folder.py", nv, "--vault", nv / "vault", "-o", W / "nv2.json")
+            dnv2 = jload(W / "nv2.json")
+            check("评审: 自回灌遗留 manifest 条目 → stale_in_vault 可见",
+                  any(p.endswith("prev.md") for p in dnv2.get("stale_in_vault", [])), dnv2.get("stale_in_vault"))
 
         with sect("[21] reduce 健壮性: 坏类型 / 长实体名 / 文件名碰撞 / doclink / dedup 链"):
             # 中15: LLM 类型漂移不崩溃，计 bad_values
@@ -894,8 +985,21 @@ def main():
                 "relations": [{"subject": "API", "predicate": "USES", "object": "api", "confidence": 0.9},
                               {"subject": "API", "predicate": "USES", "object": longname, "confidence": 0.8}]},
                 ensure_ascii=False), encoding="utf-8")
+            longdoc = "超长文档名" * 9  # 45 字符 = 135 字节 > 120 字节截断阈值，但文件名本身合法
+            (b2v / ("documents/" + longdoc + ".md")).write_text("# 长名文档\nAPI 坏kind实体", encoding="utf-8")
+            (b2v / ".wiki-tree/extracted/j2.json").write_text(json.dumps({
+                "doc_id": longdoc, "doc_md": "documents/" + longdoc + ".md", "short_summary": "s2",
+                "importance": 0.4, "topics": ["t"],
+                "entities": [{"kind": "工具/框架", "text": "坏kind实体"}],
+                "relations": [{"subject": "坏kind实体", "predicate": "USES", "object": "API", "confidence": 0.9}]},
+                ensure_ascii=False), encoding="utf-8")
             rb2v = run(SC / "assemble_vault.py", "--vault", b2v)
             ob2 = jload_str(rb2v.stdout)
+            check("M4: 长文档名 doclink 不截断（按原名引用、文件已在盘上）",
+                  f"[[{longdoc}]]" in (b2v / "_index.md").read_text(encoding="utf-8"))
+            check("M6: 非法 kind 白名单回退 concept 且建卡成功",
+                  (b2v / "entities/concept-坏kind实体.md").exists(),
+                  [p.name for p in (b2v / "entities").glob("*坏kind*")])
             check("低10: doc_id 与 doc_md 不一致 → stderr 警告 + 采用推导值",
                   "WRONG-ID" in (rb2v.stderr or "")
                   and "[[doc2]]" in (b2v / "_index.md").read_text(encoding="utf-8")
@@ -916,7 +1020,21 @@ def main():
                     tgt = m.group(1).split("|")[0].split("#")[0].strip().split("/")[-1]
                     if tgt not in notes2:
                         dangling2.append((p.name, tgt))
-            check("中17/低9: 截断+碰撞后仍零悬空 wikilink", not dangling2, str(dangling2[:5]))
+            check("中17/低9/M4: 截断+碰撞+长文档名后仍零悬空 wikilink", not dangling2, str(dangling2[:5]))
+            # M5: 中心度翻转后碰撞卡不串卡（后缀按实体名稳定分配 + 受管刷新身份校验）
+            def _fm_entity(p):
+                m5 = re.search(r"^entity:\s*(.+)$", p.read_text(encoding="utf-8"), re.M)
+                return m5.group(1).strip().strip('"') if m5 else None
+            j1p = b2v / ".wiki-tree/extracted/j1.json"
+            j1d = jload(j1p)
+            j1d["relations"] = [{"subject": "api", "predicate": "USES", "object": "API", "confidence": 0.9},
+                                {"subject": "api", "predicate": "USES", "object": longname, "confidence": 0.8}]
+            j1p.write_text(json.dumps(j1d, ensure_ascii=False), encoding="utf-8")
+            run(SC / "assemble_vault.py", "--vault", b2v)
+            check("M5: rank 翻转后碰撞卡身份不互换（entity 键与文件匹配）",
+                  _fm_entity(b2v / "entities/tool-API.md") == "API"
+                  and _fm_entity(b2v / "entities/tool-api-2.md") == "api",
+                  (_fm_entity(b2v / "entities/tool-API.md"), _fm_entity(b2v / "entities/tool-api-2.md")))
             # 低7: dedup-map 链式解析 + 空值过滤 + 环检测（进程内调用）
             sys.path.insert(0, str(SC))
             import compute_centrality as _cc
