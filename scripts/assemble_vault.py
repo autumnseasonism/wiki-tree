@@ -7,10 +7,14 @@ scan.json / _conversion_report.json）里。本脚本把这些自动化，agent 
   1. 回填 _index.md：统计（文档/实体/关系数）、中心度 Top-N、主题概览、最近处理
   2. 生成 relations/_knowledge-graph.md：按关系类型分组的完整清单 + 类型统计
   3. 生成 _processing-report.md：扫描/转换/抽取/中心度统计（消费 importance）
-  4. 生成 entities/<kind>-<text>.md 卡片骨架：front-matter + 关联/来源区段
+  4. 生成 entities/<kind>-<text>.md 卡片：front-matter + 受管区段（统计/关联/来源）
 
 **零悬空保证**：卡片之间、索引里的 wikilink 只指向"已建卡的实体"，未建卡的实体一律
 以普通文本呈现 —— 因此无论建多少卡，都不会产生悬空链接。
+
+**卡片受管区段**：自动生成的统计/关联/来源包在 <!-- wiki-tree:auto:start/end --> 标记
+内；重跑只重写 front-matter + 标记区，标记外的 agent 散文原样保留。无标记的旧版卡片
+保持现状跳过（兼容）；--force-cards 整卡重建。
 
 中心度/kind/degree 复用 compute_centrality.py 的聚合逻辑（单一真相源，避免漂移）。
 
@@ -18,12 +22,13 @@ scan.json / _conversion_report.json）里。本脚本把这些自动化，agent 
   python assemble_vault.py --vault VAULT [--dedup-map MAP] [--top 10]
         [--cards-all | --card-top N | --cards-min-degree D] [--force-cards] [--no-index]
 
-默认：卡片建给 degree>=1 的实体（连通图节点）；index/graph/report 直接覆写；
-卡片 create-if-missing（不覆盖 agent 已补的内容），重置加 --force-cards。
+默认：卡片建给 degree>=1 的实体（连通图节点）；index/graph/report 直接覆写。
 """
 
+import re
 import sys
 import json
+import hashlib
 import argparse
 from pathlib import Path
 from datetime import datetime, timezone
@@ -33,12 +38,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from compute_centrality import compute as _centrality_rows, load_dedup_map, canon  # noqa: E402
 
 _INVALID = '\\/:*?"<>|\n\r\t'
+_MAX_NAME = 80  # 文件名片段长度上限，超长截断 + 哈希后缀，避免触发文件系统路径限制
+_AUTO_START = "<!-- wiki-tree:auto:start -->"
+_AUTO_END = "<!-- wiki-tree:auto:end -->"
 
 
 def _safe(name: str) -> str:
     """实体名 → 安全文件名片段（仅替换文件系统非法字符；wikilink 也用此形式以保持一致）。"""
-    out = "".join("-" if c in _INVALID else c for c in (name or "").strip())
-    return out.strip() or "未命名"
+    raw = (name or "").strip()
+    out = "".join("-" if c in _INVALID else c for c in raw)
+    out = out.strip() or "未命名"
+    if len(out) > _MAX_NAME:
+        digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8]
+        out = out[:_MAX_NAME].rstrip() + "-" + digest
+    return out
+
+
+def _num(x, default=0.0):
+    """LLM 可能把数值字段写成字符串/null：尽力转 float，失败回 default 而非抛异常。"""
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return default
 
 
 def _now() -> str:
@@ -53,10 +74,22 @@ def load_extracted(vault: Path):
             try:
                 with open(fp, "r", encoding="utf-8") as f:
                     obj = json.load(f)
-                obj.setdefault("doc_id", fp.stem)
-                docs.append(obj)
             except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
                 print(f"警告: 跳过损坏 extracted {fp.name}: {e}", file=sys.stderr)
+                continue
+            # doc_id 是 LLM 写的，可能与实际文档文件名漂移（doclink 会悬空）：
+            # 优先从 doc_md 推导；doc_md 缺失才信 JSON 内 doc_id，再缺用文件名 stem
+            claimed = str(obj.get("doc_id") or "").strip()
+            doc_md = obj.get("doc_md")
+            if doc_md:
+                derived = Path(str(doc_md).replace("\\", "/")).stem
+            else:
+                derived = claimed or fp.stem
+            if claimed and claimed != derived:
+                print(f"警告: {fp.name} 内 doc_id={claimed!r} 与 doc_md 推导值 {derived!r} 不一致，采用后者",
+                      file=sys.stderr)
+            obj["doc_id"] = derived
+            docs.append(obj)
     return docs
 
 
@@ -69,20 +102,39 @@ def _load_json(p: Path):
 
 
 def aggregate(vault: Path, docs, dmap):
-    """汇总关系（去重）、实体→文档、文档元信息、主题分组。中心度行另由 compute 提供。"""
+    """汇总关系（去重）、实体→文档、文档元信息、主题分组。中心度行另由 compute 提供。
+
+    LLM 产物的 confidence/importance/short_summary/topics 可能是字符串/null 等坏类型：
+    数值经 _num 净化、文本/列表兜空，无法解析的值计入 bad_values 返回，不中断聚合。
+    """
     rels = {}  # (s,p,o) -> {subject,predicate,object,evidence,confidence,sources:set}
     entity_docs = defaultdict(set)
     doc_meta = {}
     topics = defaultdict(list)
+    bad_values = 0
+
+    def _numw(x, default=0.0):
+        nonlocal bad_values
+        if x is None:
+            return default
+        v = _num(x, None)
+        if v is None:
+            bad_values += 1
+            return default
+        return v
 
     for d in docs:
         did = d["doc_id"]
+        raw_topics = d.get("topics") or []
+        if not isinstance(raw_topics, list):
+            bad_values += 1
+            raw_topics = []
         doc_meta[did] = {
             "doc_id": did,
             "doc_md": d.get("doc_md") or f"documents/{did}.md",
-            "short_summary": d.get("short_summary", ""),
-            "importance": d.get("importance", 0) or 0,
-            "topics": d.get("topics", []) or [],
+            "short_summary": str(d.get("short_summary") or ""),
+            "importance": _numw(d.get("importance")),
+            "topics": [str(t) for t in raw_topics if t],
         }
         for t in doc_meta[did]["topics"]:
             topics[t].append(did)
@@ -96,23 +148,24 @@ def aggregate(vault: Path, docs, dmap):
                 continue
             s = canon(rel.get("subject"), dmap)
             o = canon(rel.get("object"), dmap)
-            p = (rel.get("predicate") or "RELATED_TO").strip()
+            p = str(rel.get("predicate") or "RELATED_TO").strip()
             if not s or not o:
                 continue
             entity_docs[s].add(did)
             entity_docs[o].add(did)
+            conf = _numw(rel.get("confidence"))
             key = (s, p, o)
             rec = rels.setdefault(key, {
                 "subject": s, "predicate": p, "object": o,
-                "evidence": rel.get("evidence", ""),
-                "confidence": rel.get("confidence", 0) or 0,
+                "evidence": rel.get("evidence") or "",
+                "confidence": conf,
                 "sources": set(),
             })
             rec["sources"].add(did)
-            if (rel.get("confidence") or 0) > rec["confidence"]:
-                rec["confidence"] = rel.get("confidence")
-                rec["evidence"] = rel.get("evidence", rec["evidence"])
-    return rels, entity_docs, doc_meta, topics
+            if conf > rec["confidence"]:
+                rec["confidence"] = conf
+                rec["evidence"] = rel.get("evidence") or rec["evidence"]
+    return rels, entity_docs, doc_meta, topics, bad_values
 
 
 def main():
@@ -129,7 +182,8 @@ def main():
     ap.add_argument("--card-top", type=int, default=0, help="只为中心度前 N 实体建卡（0=不启用）")
     ap.add_argument("--cards-min-degree", type=int, default=1,
                     help="为 degree>=该值的实体建卡（默认 1=连通图节点；设 0 含孤立实体）")
-    ap.add_argument("--force-cards", action="store_true", help="覆写已存在卡片（默认跳过，保护 agent 已补内容）")
+    ap.add_argument("--force-cards", action="store_true",
+                    help="整卡重建已存在卡片（默认只刷新受管标记区+front-matter，标记外散文保留）")
     ap.add_argument("--no-index", action="store_true", help="不生成/覆写 _index.md")
     args = ap.parse_args()
 
@@ -138,12 +192,21 @@ def main():
         print(f"错误: 未找到 {vault}\\.wiki-tree\\extracted（先跑抽取阶段）", file=sys.stderr)
         sys.exit(1)
 
-    dmap_path = args.dedup_map or (vault / ".wiki-tree" / "_dedup-map.json")
-    dmap = load_dedup_map(str(dmap_path)) if Path(dmap_path).exists() else {}
+    if args.dedup_map:
+        # 用户显式指定的映射文件不存在 → 报错退出（静默忽略会让去重悄悄失效）
+        dmap_path = Path(args.dedup_map)
+        if not dmap_path.exists():
+            print(f"错误: --dedup-map 指定的文件不存在: {dmap_path}", file=sys.stderr)
+            sys.exit(1)
+        dmap = load_dedup_map(str(dmap_path))
+    else:
+        # 默认路径属"可选自动发现"，缺失是常态，静默回空映射
+        dmap_path = vault / ".wiki-tree" / "_dedup-map.json"
+        dmap = load_dedup_map(str(dmap_path)) if dmap_path.exists() else {}
 
     docs = load_extracted(vault)
     rows, _skipped = _centrality_rows(vault, dmap)
-    rels, entity_docs, doc_meta, topics = aggregate(vault, docs, dmap)
+    rels, entity_docs, doc_meta, topics, bad_values = aggregate(vault, docs, dmap)
 
     kind_of = {r["entity"]: (r["kind"] or "concept") for r in rows}
     rank_of = {r["entity"]: r["rank"] for r in rows}
@@ -157,27 +220,47 @@ def main():
         carded = [r["entity"] for r in rows if r["degree"] >= args.cards_min_degree]
     carded_set = set(carded)
 
+    # 卡片文件名预解析：不同实体经 _safe 清洗/截断后可能同名（含大小写不敏感文件系统），
+    # 本轮内后到者追加 -2/-3 序号。wikilink 与写盘共用该映射，保证零悬空且不指错卡。
+    card_file = {}
+    used_names = set()
+    collisions = []
+    for e in carded:
+        base = f"{kind_of.get(e, 'concept')}-{_safe(e)}"
+        fname, n = base, 2
+        while fname.casefold() in used_names:
+            fname = f"{base}-{n}"
+            n += 1
+        used_names.add(fname.casefold())
+        card_file[e] = fname
+        if fname != base:
+            collisions.append({"entity": e, "file": f"{fname}.md", "base": f"{base}.md"})
+
     def link(e):
         """已建卡 → wikilink（带别名显示原名）；否则普通文本。保证零悬空。"""
         if e in carded_set:
-            return f"[[{kind_of.get(e, 'concept')}-{_safe(e)}|{e}]]"
+            return f"[[{card_file[e]}|{e}]]"
         return e
 
     def doclink(did):
         return f"[[{_safe(did)}]]"
 
-    written = {"cards_created": 0, "cards_skipped": 0, "files": []}
+    def _front_matter(kind, row, created_at):
+        return (
+            f"---\nkind: entity\nentity_type: {kind}\ntags:\n  - {kind}\n  - source/local-files\n"
+            f"created_at: {created_at}\ncentrality_rank: {row['rank']}\ncentrality_degree: {row['degree']}\n---\n"
+        )
+
+    written = {"cards_created": 0, "cards_updated": 0, "cards_skipped": 0, "files": []}
+    errors = []
     ent_dir = vault / "entities"
     ent_dir.mkdir(parents=True, exist_ok=True)
     deg_of = {r["entity"]: r for r in rows}
 
-    # ---- 实体卡片骨架 ----
+    # ---- 实体卡片 ----
     for e in carded:
         k = kind_of.get(e, "concept")
-        path = ent_dir / f"{k}-{_safe(e)}.md"
-        if path.exists() and not args.force_cards:
-            written["cards_skipped"] += 1
-            continue
+        path = ent_dir / f"{card_file[e]}.md"
         row = deg_of[e]
         rel_lines = []
         for rec in rels.values():
@@ -186,18 +269,51 @@ def main():
             elif rec["object"] == e:
                 rel_lines.append(f"- {link(rec['subject'])} → **{rec['predicate']}**")
         src_lines = [f"- {doclink(d)}" for d in sorted(entity_docs.get(e, ()))]
-        body = (
-            f"---\nkind: entity\nentity_type: {k}\ntags:\n  - {k}\n  - source/local-files\n"
-            f"created_at: {_now()}\ncentrality_rank: {row['rank']}\ncentrality_degree: {row['degree']}\n---\n\n"
-            f"# {e}\n\n"
+        auto = (
+            _AUTO_START + "\n"
             f"**类型**：{k}｜中心度 #{row['rank']}（degree={row['degree']}, "
             f"relations={row['relation_count']}, docs={row['doc_count']}）\n\n"
-            f"<!-- 说明：可由 Agent 补充该实体的定义/作用（1-2 句）。本卡片骨架由 assemble_vault.py 生成。 -->\n\n"
-            f"## 关联\n" + ("\n".join(rel_lines) if rel_lines else "（无显式关系）") + "\n\n"
-            f"## 来源\n" + ("\n".join(src_lines) if src_lines else "（无）") + "\n"
+            "## 关联\n" + ("\n".join(rel_lines) if rel_lines else "（无显式关系）") + "\n\n"
+            "## 来源\n" + ("\n".join(src_lines) if src_lines else "（无）") + "\n"
+            + _AUTO_END
         )
-        path.write_text(body, encoding="utf-8")
-        written["cards_created"] += 1
+        try:
+            if path.exists() and not args.force_cards:
+                old = path.read_text(encoding="utf-8")
+                if _AUTO_START not in old or old.find(_AUTO_END) <= old.find(_AUTO_START):
+                    # 旧版无标记卡：无法区分手工内容与自动内容，保持现状不动
+                    written["cards_skipped"] += 1
+                    continue
+                # 受管刷新：front-matter（中心度统计随重跑变化）+ 标记区重写；
+                # 标记区外（agent 补写的散文）原样保留，created_at 沿用旧值
+                created = _now()
+                fm_m = re.match(r"^---\n.*?\n---\n", old, re.DOTALL)
+                body = old
+                if fm_m:
+                    cm = re.search(r"^created_at:\s*(.+)$", fm_m.group(0), re.MULTILINE)
+                    if cm:
+                        created = cm.group(1).strip()
+                    body = _front_matter(k, row, created) + old[fm_m.end():]
+                si, ei = body.find(_AUTO_START), body.find(_AUTO_END)
+                if si == -1 or ei <= si:
+                    written["cards_skipped"] += 1
+                    continue
+                body = body[:si] + auto + body[ei + len(_AUTO_END):]
+                path.write_text(body, encoding="utf-8")
+                written["cards_updated"] += 1
+                continue
+            body = (
+                _front_matter(k, row, _now()) + "\n"
+                f"# {e}\n\n"
+                f"<!-- 说明：可由 Agent 补充该实体的定义/作用（1-2 句）；标记区内由 assemble_vault.py 维护、"
+                f"重跑会刷新，散文请写在标记区外。 -->\n\n"
+                + auto + "\n"
+            )
+            path.write_text(body, encoding="utf-8")
+            written["cards_created"] += 1
+        except OSError as exc:
+            # 个别实体名仍可能踩中文件系统限制：记入 errors 后继续，单卡失败不毁整次装配
+            errors.append({"entity": e, "file": path.name, "error": str(exc)})
 
     # ---- relations/_knowledge-graph.md ----
     by_pred = defaultdict(list)
@@ -303,7 +419,11 @@ def main():
         "relations": len(rels),
         "topics": len(topics),
         "cards_created": written["cards_created"],
+        "cards_updated": written["cards_updated"],
         "cards_skipped": written["cards_skipped"],
+        "collisions": collisions,
+        "errors": errors,
+        "bad_values": bad_values,
         "generated": written["files"],
     }, ensure_ascii=False, indent=2))
 

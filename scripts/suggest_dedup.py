@@ -53,12 +53,13 @@ def collect_entities(vault: Path):
             continue
         did = obj.get("doc_id", fp.stem)
         for ent in obj.get("entities", []) or []:
-            if isinstance(ent, dict) and (ent.get("text") or "").strip():
-                freq[ent["text"].strip()].add(did)
+            text = ent.get("text") if isinstance(ent, dict) else None
+            if isinstance(text, str) and text.strip():
+                freq[text.strip()].add(did)
         for rel in obj.get("relations", []) or []:
             if isinstance(rel, dict):
                 for endp in (rel.get("subject"), rel.get("object")):
-                    if endp and endp.strip():
+                    if isinstance(endp, str) and endp.strip():
                         freq[endp.strip()].add(did)
     return {k: len(v) for k, v in freq.items()}
 
@@ -78,41 +79,64 @@ def main():
     vault = Path(args.vault)
     freq = collect_entities(vault)
     ents = sorted(freq)
+    norms = {e: _norm(e) for e in ents}  # 预计算一次，内层循环不再重复归一化
     seen = set()
     cands = []
 
-    for i in range(len(ents)):
-        for j in range(i + 1, len(ents)):
-            a, b = ents[i], ents[j]
-            reason = None
-            na, nb = _norm(a), _norm(b)
-            if na and na == nb:
-                reason = "归一化后相等"
-            elif len(min(a, b, key=len)) >= 3 and (
-                    (a in b or b in a) and a != b):
-                reason = "子串包含"
-            elif min(len(a), len(b)) >= 4 and a.isascii() and b.isascii() \
-                    and _edit_distance(a.lower(), b.lower()) <= 1:
-                reason = "编辑距离≤1（疑似拼写差异）"
-            if reason:
-                key = tuple(sorted((a, b)))
-                if key in seen:
-                    continue
-                seen.add(key)
-                # freq 高者更可能是规范名；并列则取较短
-                canonical = max((a, b), key=lambda x: (freq[x], -len(x)))
-                variant = b if canonical == a else a
-                cands.append({
-                    "variants": [a, b],
-                    "reason": reason,
-                    "suggest_canonical": canonical,
-                    "suggest_map": {variant: canonical},
-                    "freq": {a: freq[a], b: freq[b]},
-                })
+    def _add(a, b, reason):
+        # 调用方保证 a < b（ents/桶均已排序），与原两两循环的配对方向一致
+        key = (a, b)
+        if key in seen:
+            return
+        seen.add(key)
+        # freq 高者更可能是规范名；并列则取较短
+        canonical = max((a, b), key=lambda x: (freq[x], -len(x)))
+        variant = b if canonical == a else a
+        cands.append({
+            "variants": [a, b],
+            "reason": reason,
+            "suggest_canonical": canonical,
+            "suggest_map": {variant: canonical},
+            "freq": {a: freq[a], b: freq[b]},
+        })
+
+    # 规则 1（归一化后相等）：按 norm 分桶后组内配对，避免参与 O(n²) 两两比较
+    buckets = defaultdict(list)
+    for e in ents:
+        if norms[e]:
+            buckets[norms[e]].append(e)
+    for n in sorted(buckets):
+        group = buckets[n]
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                _add(group[i], group[j], "归一化后相等")
                 if len(cands) >= args.max_pairs:
                     break
+            if len(cands) >= args.max_pairs:
+                break
         if len(cands) >= args.max_pairs:
             break
+
+    # 规则 2/3（子串 / 编辑距离）：保留两两比较；规则 1 已命中的对经 seen 跳过（优先级不变）
+    if len(cands) < args.max_pairs:
+        for i in range(len(ents)):
+            for j in range(i + 1, len(ents)):
+                a, b = ents[i], ents[j]
+                if (a, b) in seen:
+                    continue
+                reason = None
+                if len(min(a, b, key=len)) >= 3 and (
+                        (a in b or b in a) and a != b):
+                    reason = "子串包含"
+                elif min(len(a), len(b)) >= 4 and a.isascii() and b.isascii() \
+                        and _edit_distance(a.lower(), b.lower()) <= 1:
+                    reason = "编辑距离≤1（疑似拼写差异）"
+                if reason:
+                    _add(a, b, reason)
+                    if len(cands) >= args.max_pairs:
+                        break
+            if len(cands) >= args.max_pairs:
+                break
 
     result = {
         "vault": str(vault),

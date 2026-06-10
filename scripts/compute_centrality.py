@@ -27,19 +27,45 @@ from collections import defaultdict
 
 
 def load_dedup_map(path):
-    """读取 变体→规范名 映射；未提供则返回 {}（即默认原始频次模式）。"""
+    """读取 变体→规范名 映射；未提供则返回 {}（即默认原始频次模式）。
+
+    清洗：规范名为空/null 的条目丢弃（stderr 警告，避免把实体静默折叠成空名）；
+    链式映射 A→B、B→C 折叠为 A→C（传递闭包），遇环保持该条原值并警告。
+    """
     if not path:
         return {}
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, dict):
         raise SystemExit(f"--dedup-map 应为 JSON 对象 {{变体: 规范}}，实际为 {type(data).__name__}")
-    return {str(k).strip(): str(v).strip() for k, v in data.items() if str(k).strip()}
+    dmap = {}
+    for k, v in data.items():
+        ks = str(k).strip()
+        vs = "" if v is None else str(v).strip()
+        if not ks:
+            continue
+        if not vs:
+            print(f"警告: dedup-map 条目 {ks!r} 的规范名为空，已忽略该条目", file=sys.stderr)
+            continue
+        dmap[ks] = vs
+    resolved = {}
+    for k, v in dmap.items():
+        seen = {k}
+        cur = v
+        while cur in dmap and cur not in seen:
+            seen.add(cur)
+            cur = dmap[cur]
+        if cur in seen and cur in dmap:
+            print(f"警告: dedup-map 中 {k!r} 的映射链存在环，保持原值 {v!r}", file=sys.stderr)
+            resolved[k] = v
+        else:
+            resolved[k] = cur
+    return resolved
 
 
 def canon(name, dmap):
-    """把实体名折叠成规范名（不在映射里就原样返回）。"""
-    name = (name or "").strip()
+    """把实体名折叠成规范名（不在映射里就原样返回）。非字符串输入按字符串兜底，不崩溃。"""
+    name = str(name or "").strip()
     return dmap.get(name, name)
 
 
@@ -70,7 +96,7 @@ def compute(vault: Path, dmap: dict):
             if not text:
                 continue
             docs[text].add(doc_id)
-            kind = (ent.get("kind") or "").strip()
+            kind = str(ent.get("kind") or "").strip()
             if kind:
                 kind_votes[text][kind] += 1
 
