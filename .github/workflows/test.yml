@@ -1,0 +1,44 @@
+# 2×2 矩阵：{Windows, Ubuntu} × {bare 裸环境, full 全依赖}
+# - bare 腿什么都不装：验证「核心纯标准库、0 安装即可用」的承诺 + 可选依赖缺失的 SKIP/退路分支
+#   （docx/pdf 转换用例 SKIP=2；kb_mcp_server 缺 SDK 的 rc=2 路径只有这条腿能执行到）
+# - full 腿装 requirements.txt：验证 docx/pdf 真实转换路径（mcp 已装 → 该用例 SKIP=1）
+# - EXPECT_SKIPS 把每条腿的预期跳过数钉死：依赖装错腿（缓存污染/漏装）会直接红，而不是静默少测
+name: test
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        deps: [bare, full]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install optional deps (full leg only)
+        if: matrix.deps == 'full'
+        run: python -m pip install -r requirements.txt
+
+      - name: Guard bare leg is actually bare
+        if: matrix.deps == 'bare'
+        shell: bash
+        run: |
+          for m in docx fitz mcp; do
+            if python -c "import $m" 2>/dev/null; then
+              echo "::error::bare leg is not bare: '$m' is importable"
+              exit 1
+            fi
+          done
+
+      - name: Run test suite
+        env:
+          PYTHONUTF8: "1"
+          EXPECT_SKIPS: ${{ matrix.deps == 'bare' && '2' || '1' }}
+        run: python tests/test_skill.py
