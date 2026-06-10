@@ -31,6 +31,14 @@ SUPPORTED_EXTENSIONS = {
     '.csv': 'csv',
 }
 
+# 内置剪枝目录集：依赖/构建产物目录通常不含源文档，默认不深入。
+# 非隐藏名（build/dist/target 等）可能恰好被用户用来放文档，
+# 命中时记录到报告 builtin_excluded_dirs，保证「被吞」可被发现。
+BUILTIN_PRUNE_DIRS = {
+    'node_modules', '__pycache__', '.git', 'venv', '.venv',
+    'target', 'build', 'dist', '.obsidian',
+}
+
 
 def load_manifest(vault):
     """读取增量 manifest 的 processed 段；vault 为空或文件不存在/损坏时返回 {}。"""
@@ -96,6 +104,20 @@ def scan_folder(target_path, vault=None, exclude=None):
     manifest = load_manifest(vault)
     # 归一化路径（大小写/分隔符）以可靠匹配 manifest 键与扫描到的文件
     manifest_norm = {os.path.normcase(k): v for k, v in manifest.items()}
+    # 归一化键 → manifest 原始键（孤儿检测要报告原始路径）
+    manifest_keys = {os.path.normcase(k): k for k in manifest}
+
+    # vault 严格位于扫描目标之内时必须剪掉：否则上一轮产物
+    # （documents/entities/summaries 等非隐藏 .md）会被当作源文件回灌，逐轮膨胀
+    vault_inside = None
+    if vault:
+        v = Path(vault).resolve()
+        if v != target:
+            try:
+                v.relative_to(target)
+                vault_inside = v
+            except ValueError:
+                pass
 
     results = {
         "scan_time": datetime.now(timezone.utc).isoformat(),
@@ -108,6 +130,8 @@ def scan_folder(target_path, vault=None, exclude=None):
         "unsupported_extensions": set(),
         "excluded_count": 0,
         "exclude_patterns": patterns,
+        "vault_excluded": vault_inside is not None,
+        "builtin_excluded_dirs": [],
     }
 
     for category in set(SUPPORTED_EXTENSIONS.values()):
@@ -117,13 +141,24 @@ def scan_folder(target_path, vault=None, exclude=None):
             "files": []
         }
 
+    scanned_norm = set()
+
     for root, dirs, files in os.walk(target):
         rootp = Path(root)
-        # 跳过隐藏目录和常见的非文档目录
-        dirs[:] = [d for d in dirs if not d.startswith('.') and d not in {
-            'node_modules', '__pycache__', '.git', 'venv', '.venv',
-            'target', 'build', 'dist', '.obsidian'
-        }]
+        # vault 位于扫描目标之内：剪掉 vault 目录本身（resolve 比较，吸收符号链接/相对路径差异）
+        if vault_inside is not None:
+            dirs[:] = [d for d in dirs if (rootp / d).resolve() != vault_inside]
+        # 跳过隐藏目录和常见的非文档目录；命中内置集的非隐藏目录记录相对路径
+        kept = []
+        for d in dirs:
+            if d.startswith('.'):
+                continue
+            if d in BUILTIN_PRUNE_DIRS:
+                results["builtin_excluded_dirs"].append(
+                    (rootp / d).relative_to(target).as_posix())
+                continue
+            kept.append(d)
+        dirs[:] = kept
         # 用户 exclude / .mwignore：命中的目录剪枝（不再深入遍历）
         if patterns:
             dirs[:] = [d for d in dirs if not _is_excluded(
@@ -160,7 +195,9 @@ def scan_folder(target_path, vault=None, exclude=None):
                 }
 
                 # 增量状态：与 manifest 比对（manifest 只记录已抽取完成 = done 的源）
-                rec = manifest_norm.get(os.path.normcase(str(fpath)))
+                norm_path = os.path.normcase(str(fpath))
+                scanned_norm.add(norm_path)
+                rec = manifest_norm.get(norm_path)
                 if rec is None:
                     file_info["status"] = "new"
                 elif rec.get("mtime") != file_info["modified_at"]:
@@ -179,6 +216,20 @@ def scan_folder(target_path, vault=None, exclude=None):
                     results["unsupported_extensions"].add(ext)
 
     results["unsupported_extensions"] = sorted(list(results["unsupported_extensions"]))
+    results["builtin_excluded_dirs"].sort()
+
+    if results["vault_excluded"]:
+        if vault_inside.is_dir():
+            print(f"提示: Vault 位于扫描目标之内，已从扫描范围排除: {vault_inside}", file=sys.stderr)
+        else:
+            print(f"提示: 检测到 Vault 计划位于扫描目标之内（目录尚不存在），"
+                  f"后续轮次将自动剪枝；仍建议把输出目录移出扫描目标: {vault_inside}", file=sys.stderr)
+    if results["builtin_excluded_dirs"]:
+        shown = results["builtin_excluded_dirs"][:10]
+        more = len(results["builtin_excluded_dirs"]) - len(shown)
+        tail = f" 等（其余 {more} 个见报告 builtin_excluded_dirs）" if more else ""
+        print(f"提示: 已跳过 {len(results['builtin_excluded_dirs'])} 个内置排除目录"
+              f"（依赖/构建产物目录默认不扫描）: {', '.join(shown)}{tail}", file=sys.stderr)
 
     # 增量模式：拆出待处理集（new + modified），处理计划只覆盖它，已完成的跳过
     if vault:
@@ -190,6 +241,17 @@ def scan_folder(target_path, vault=None, exclude=None):
         results["pending_count"] = len(pending)
         results["files"] = pending  # 下游（转换/抽取）只面向待处理集
         plan_total = len(pending)
+        # 孤儿源：manifest 已登记、本轮未扫到且盘上已不存在（仍存在的只是被
+        # exclude/缩小扫描范围，不算）。只可见化不删除，清理决策留给 agent/用户。
+        orphaned = sorted(
+            orig for norm, orig in manifest_keys.items()
+            if norm not in scanned_norm and not os.path.isfile(orig)
+        )
+        results["orphaned"] = orphaned
+        results["orphaned_count"] = len(orphaned)
+        if orphaned:
+            print(f"提示: manifest 中 {len(orphaned)} 个已登记源文件已不存在（孤儿），"
+                  f"其产物仍留在 vault 中，见报告 orphaned 字段", file=sys.stderr)
     else:
         results["incremental"] = False
         plan_total = results["supported_files"]
