@@ -17,6 +17,7 @@
 import os
 import sys
 import json
+import shutil
 import argparse
 from datetime import datetime, timezone
 
@@ -31,12 +32,29 @@ def _abs(p):
 
 
 def load_registry(path):
+    # registry 是全机所有 KB 的唯一登记处：已存在但读不出来时绝不能静默重置为空表再覆盖
+    # （那会一次清空全部登记），必须中止交人工处置；文件不存在才是正常的首次初始化。
     if os.path.exists(path):
         try:
             return json.load(open(path, encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            pass
+        except json.JSONDecodeError as e:
+            print("错误：registry 已存在但不是合法 JSON：%s\n  解析错误：%s\n"
+                  "  请手工修复（或确认无需保留后删除该文件）再重跑，本次不做任何写入。"
+                  % (path, e), file=sys.stderr)
+            sys.exit(1)
+        except OSError as e:
+            print("错误：registry 存在但无法读取：%s（%s）。本次不做任何写入。"
+                  % (path, e), file=sys.stderr)
+            sys.exit(1)
     return {"version": "1.0", "knowledge_bases": []}
+
+
+def _atomic_write(path, text):
+    """临时文件 + os.replace：写一半被打断也不会留下半截文件。"""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
 
 
 def build_entry(vault):
@@ -79,19 +97,33 @@ def install_hook(hook_file, block):
     hook_file = os.path.expanduser(hook_file)
     os.makedirs(os.path.dirname(hook_file), exist_ok=True)
     old = open(hook_file, encoding="utf-8").read() if os.path.exists(hook_file) else ""
-    if _BEGIN_TAG in old and END in old:
+    if _BEGIN_TAG in old:
         bi = old.index(_BEGIN_TAG)
-        ei = old.index(END, bi) + len(END)
-        new = old[:bi] + block + old[ei:]
+        ei = old.find(END, bi)
+        if ei < 0:
+            # 孤立 BEGIN（其后无配对 END，含 END 只出现在 BEGIN 之前）：若此时走追加分支，
+            # 下次替换会把孤立 BEGIN 到新块 END 之间的用户内容整段吞掉 → 必须拒绝改写。
+            print("错误：%s 中存在孤立的 KB-HUB BEGIN 标记（其后找不到配对的 %s）。\n"
+                  "  为避免后续替换吞掉标记之间的内容，本次未改写该文件；"
+                  "请手动删除孤立标记（或补上配对 END）后重跑 --install-hook。"
+                  % (hook_file, END), file=sys.stderr)
+            sys.exit(1)
+        new = old[:bi] + block + old[ei + len(END):]
     else:
         sep = "" if old.endswith("\n\n") or old == "" else ("\n" if old.endswith("\n") else "\n\n")
         new = old + sep + block + "\n"
-    open(hook_file, "w", encoding="utf-8").write(new)
+    if new == old:
+        return  # 内容未变（幂等重跑）：不写盘也不产生备份
+    # 改写的是用户的全局指令文件：先留备份，再原子替换
+    if os.path.exists(hook_file):
+        shutil.copy2(hook_file, hook_file + ".bak-" + datetime.now().strftime("%Y%m%d-%H%M%S"))
+    _atomic_write(hook_file, new)
 
 
 def main():
     try:
         sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
     except (AttributeError, ValueError):
         pass
     ap = argparse.ArgumentParser()
@@ -109,7 +141,7 @@ def main():
     reg["knowledge_bases"] = [k for k in reg.get("knowledge_bases", []) if k.get("id") != entry["id"]]
     reg["knowledge_bases"].append(entry)
     reg["knowledge_bases"].sort(key=lambda k: k.get("id", ""))
-    json.dump(reg, open(reg_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    _atomic_write(reg_path, json.dumps(reg, ensure_ascii=False, indent=2))
     print("已登记到全局 registry: %s（共 %d 个 KB）" % (reg_path, len(reg["knowledge_bases"])))
 
     block = render_block(reg)

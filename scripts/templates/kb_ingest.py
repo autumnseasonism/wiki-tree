@@ -342,21 +342,34 @@ def resolve_scripts_dir(pol):
     return None
 
 
-def _run(cmd):
-    print("   $ " + " ".join('"%s"' % c if (" " in c) else c for c in cmd))
-    r = subprocess.run(cmd)
+def _run(cmd, log=None):
+    """log=None：子进程直连终端（人类可读模式）。
+    log 是列表时：捕获命令回显与子进程输出收进 log，不向 stdout 写任何东西——
+    --json 模式的契约是 stdout 只有最终一个 JSON 对象，进度行混入会让消费方解析失败。"""
+    echo = "   $ " + " ".join('"%s"' % c if (" " in c) else c for c in cmd)
+    if log is None:
+        print(echo)
+        r = subprocess.run(cmd)
+    else:
+        log.append(echo)
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+        for out in (r.stdout, r.stderr):
+            if out and out.strip():
+                log.append(out.strip())
     if r.returncode != 0:
         raise RuntimeError("命令失败(rc=%d): %s" % (r.returncode, " ".join(cmd)))
 
 
-def stage_build(vault, scripts):
+def stage_build(vault, scripts, log=None):
     """确定性：增量 scan + convert（抽取前可做的全部）。"""
     py = sys.executable
     mw = Path(vault) / ".wiki-tree"
     inbox, scan_out = str(mw / "_ingest"), str(mw / "_ingest_scan.json")
-    _run([py, str(Path(scripts) / "scan_folder.py"), inbox, "--vault", vault, "-o", scan_out])
+    _run([py, str(Path(scripts) / "scan_folder.py"), inbox, "--vault", vault, "-o", scan_out],
+         log=log)
     _run([py, str(Path(scripts) / "convert_documents.py"),
-          "--scan-report", scan_out, "--output", vault])
+          "--scan-report", scan_out, "--output", vault], log=log)
 
 
 def finalize(vault, kb, scripts):
@@ -371,13 +384,65 @@ def finalize(vault, kb, scripts):
     _run([py, str(Path(scripts) / "assemble_vault.py"), "--vault", vault])
     emit = [py, str(Path(scripts) / "emit_access_bundle.py"), "--vault", vault,
             "--id", kb["id"], "--name", kb["name"], "--scope", kb.get("scope", "")]
-    if kb.get("use_when"):
-        emit += ["--extra-use-when", ",".join(kb["use_when"])]
+    # 只回灌 kb.json 里用户手补的领域词（extra_use_when，由 emit 持久化），不存在则不传；
+    # 绝不回灌整个 use_when——其主体是自动派生词，回灌会让触发面逐轮单调膨胀。
+    extra = []
+    kbj = Path(vault) / "kb.json"
+    if kbj.exists():
+        try:
+            extra = json.loads(kbj.read_text(encoding="utf-8")).get("extra_use_when") or []
+        except (OSError, json.JSONDecodeError):
+            extra = []
+    if extra:
+        emit += ["--extra-use-when", ",".join(extra)]
     _run(emit)
     _run([py, str(Path(scripts) / "kb_register.py"), "--vault", vault])
 
 
+def _fm_value(v):
+    """front-matter 标量取值：source_path 可能是 YAML 双引号风格（反斜杠/引号已转义），
+    去引号并还原转义；裸值原样返回。"""
+    v = v.strip()
+    if len(v) >= 2 and v[0] == '"' and v[-1] == '"':
+        v = re.sub(r"\\(.)", r"\1", v[1:-1])
+    return v
+
+
+def _residues(vault, basename, keep=()):
+    """回滚后兜底扫描：documents/ 的 front-matter 与 extracted/ 的 source 仍指向该
+    basename 的产物（如含空格文件名 stem 推断失败的遗留）。keep 内的路径不算残留。"""
+    mw = Path(vault) / ".wiki-tree"
+    keep_rs = {Path(k).resolve() for k in keep if k}
+    found = []
+    docs = Path(vault) / "documents"
+    if docs.is_dir():
+        for md in docs.glob("*.md"):
+            if md.resolve() in keep_rs:
+                continue
+            try:
+                head = md.read_text(encoding="utf-8", errors="ignore")[:600]
+            except OSError:
+                continue
+            m = re.search(r"^source_path:[ \t]*(.+)$", head, re.M)
+            if m and Path(_fm_value(m.group(1))).name == basename:
+                found.append(str(md))
+    ext = mw / "extracted"
+    if ext.is_dir():
+        for j in ext.glob("*.json"):
+            if j.resolve() in keep_rs:
+                continue
+            try:
+                data = json.loads(j.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            src = data.get("source_path") or data.get("source") or ""
+            if src and Path(src).name == basename:
+                found.append(str(j))
+    return found
+
+
 def rollback(vault, basename):
+    """返回残留产物列表（空表 = 回滚干净）。"""
     mw = Path(vault) / ".wiki-tree"
     removed = []
     staged = mw / "_ingest" / basename
@@ -387,30 +452,40 @@ def rollback(vault, basename):
             removed.append(str(staged))
         except OSError:
             pass
-    # best-effort：从转换报告映射 inbox 源 → 产物 doc-md
-    doc_md = None
+    # best-effort：从转换报告映射 inbox 源 → 产物 doc-md（convert_documents 写的容器键是 details）
+    doc_md, dup_of = None, None
     rep = Path(vault) / "_conversion_report.json"
     if rep.exists():
         try:
             data = json.loads(rep.read_text(encoding="utf-8"))
             entries = data if isinstance(data, list) else (
-                data.get("results") or data.get("converted") or [])
+                data.get("details") or data.get("results") or data.get("converted") or [])
             for e in entries or []:
                 src = e.get("source") or e.get("source_path") or e.get("path") or ""
                 if src and (Path(src).name == basename or src.endswith(basename)):
-                    doc_md = e.get("output") or e.get("doc_md") or e.get("md") or ""
+                    if e.get("status") == "skipped" and e.get("duplicate_of"):
+                        dup_of = e["duplicate_of"]
+                    else:
+                        doc_md = e.get("output") or e.get("doc_md") or e.get("md") or ""
                     break
         except (OSError, json.JSONDecodeError):
             pass
-    stem = Path(doc_md).stem if doc_md else Path(basename).stem
-    for cand in [Path(vault) / "documents" / (stem + ".md"),
-                 mw / "extracted" / (stem + ".json")]:
-        if cand.exists():
-            try:
-                cand.unlink()
-                removed.append(str(cand))
-            except OSError:
-                pass
+    keep = []
+    if dup_of:
+        # 内容重复件本就未产出文档：documents/extracted 里的同名产物属于 canonical 源，
+        # 不能删，否则回滚一份副本会连带毁掉正主。
+        keep = [dup_of, str(mw / "extracted" / (Path(dup_of).stem + ".json"))]
+        print("  （%s 为内容重复件，无独立产物；保留 canonical: %s）" % (basename, dup_of))
+    else:
+        stem = Path(doc_md).stem if doc_md else Path(basename).stem
+        for cand in [Path(vault) / "documents" / (stem + ".md"),
+                     mw / "extracted" / (stem + ".json")]:
+            if cand.exists():
+                try:
+                    cand.unlink()
+                    removed.append(str(cand))
+                except OSError:
+                    pass
     mf = mw / "manifest.json"
     if mf.exists():
         try:
@@ -428,6 +503,13 @@ def rollback(vault, basename):
         print("  - 删除 %s" % r)
     if not removed:
         print("  （未找到可回滚的产物——可能尚未 build/extract）")
+    leftovers = _residues(vault, basename, keep=keep)
+    if leftovers:
+        print("警告：以下产物的 source 仍指向 %s，本次未能回滚，请手动核对处理：" % basename,
+              file=sys.stderr)
+        for f in leftovers:
+            print("  ! %s" % f, file=sys.stderr)
+    return leftovers
 
 
 # ---------------- 输出 ----------------
@@ -479,7 +561,9 @@ def print_handoff(by_kb, scripts, built):
               % (sd, vault, vault))
         print("  3) 收尾（确定性；本脚本可代跑：python kb_ingest.py --finalize --kb %s）:" % kid)
         print("     compute_centrality → assemble_vault → emit_access_bundle → kb_register")
-        print("  4) 摘要（LLM·agent，可选）: 新增内容若影响某主题，重写 summaries/topic-<主题>.md（及全局摘要）")
+        print("  4) 摘要（LLM·agent）: 新增内容影响的主题重写 summaries/topic-<主题>.md（及全局摘要）；")
+        print("     写完后重跑 --finalize（或单独重跑 emit_access_bundle）刷新 kb.json 的"
+              " one_liner/summary_file——新主题不做这步会指向不存在的摘要文件")
 
 
 # ---------------- 主流程 ----------------
@@ -552,8 +636,12 @@ def main():
         if not root or not Path(root).exists():
             print("错误：KB '%s' 的 root 无效/不存在: %r" % (a.kb, root), file=sys.stderr)
             sys.exit(2)
-        rollback(root, a.rollback)
-        print("已回滚暂存: %s（如需重建，跑 --finalize --kb %s）" % (a.rollback, a.kb))
+        leftovers = rollback(root, a.rollback)
+        if leftovers:
+            print("回滚不彻底：仍有 %d 处产物指向 %s（见上方警告），请手动核对后再 --finalize"
+                  % (len(leftovers), a.rollback), file=sys.stderr)
+        else:
+            print("已回滚暂存: %s（如需重建，跑 --finalize --kb %s）" % (a.rollback, a.kb))
         return
 
     if not a.paths:
@@ -593,13 +681,14 @@ def main():
                 "ambiguous": [p["name"] for p in plan if p["state"] == "ambiguous"],
                 "none": [p["name"] for p in plan if p["state"] == "none"]}
             if a.build and scripts and by_kb:
-                errs = {}
+                errs, build_log = {}, []
                 for kid, vault in by_kb.items():
                     try:
-                        stage_build(vault, scripts)
+                        stage_build(vault, scripts, log=build_log)
                     except Exception as e:
                         errs[kid] = str(e)
                 result["built"] = (not errs)
+                result["build_log"] = build_log
                 if errs:
                     result["build_errors"] = errs
         print(json.dumps(result, ensure_ascii=False, indent=2))
