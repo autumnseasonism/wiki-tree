@@ -92,7 +92,8 @@ python scripts/convert_documents.py --scan-report <vault>/.wiki-tree/scan.json -
 # 4. reduce：中心度 + 装配
 python scripts/compute_centrality.py --vault <vault> -o <vault>/.wiki-tree/centrality.json
 python scripts/assemble_vault.py     --vault <vault>
-# 5. 接入包（让 agent 可检索）
+# 5. 接入包（让 agent 可检索）：先拷通用查询模板，再生成自描述（详见 SKILL.md Phase 9）
+cp scripts/templates/kb_query.py scripts/templates/kb_mcp_server.py <vault>/
 python scripts/emit_access_bundle.py --vault <vault> --id <kebab-id> --name "库名" --scope "一句话简介"
 ```
 
