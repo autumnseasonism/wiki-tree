@@ -202,14 +202,17 @@ tags:
 
 
 def create_memory_substrate(vault_path: Path):
-    """创建增量/并行共享的状态底座：.wiki-tree/ + extracted/ + 空 manifest。
+    """创建增量/并行共享的状态底座：.wiki-tree/ + extracted/ + tmp/ + 空 manifest。
 
     - manifest.json：「哪些源文件已抽取完成」的唯一真相源（增量判断依据）
     - extracted/：每篇文档的抽取结果 JSON（持久缓存，reduce 阶段全量重建图谱）
+    - tmp/：SKILL.md Phase 4.1 契约让 worker 把过闸前实体 JSON 写到这里；
+      冷启动 worker 用 shell 重定向（> tmp/x.json）不会自建目录，这里顺手建好
     目录名以 . 开头，扫描时会被 scan_folder 自动排除，不会污染源扫描。
     """
     mw = vault_path / ".wiki-tree"
     (mw / "extracted").mkdir(parents=True, exist_ok=True)
+    (mw / "tmp").mkdir(parents=True, exist_ok=True)
     manifest = mw / "manifest.json"
     if not manifest.exists():
         manifest.write_text(

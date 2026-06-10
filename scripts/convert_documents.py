@@ -104,7 +104,13 @@ def convert_json(file_path: str) -> str:
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise RuntimeError(f"JSON 解析失败: {e}") from e
 
-    return json_to_markdown(data, level=2)
+    result = json_to_markdown(data, level=2)
+    # 与 convert_text 同构的总量截断：JSON_LIST_CAP 只封顶数组项数，
+    # 巨型标量/大字典（单键塞日志、base64、聊天导出常见）仍可能产出巨型 md
+    if len(result) > MAX_TEXT_CHARS:
+        result = (result[:MAX_TEXT_CHARS]
+                  + f"\n\n<!-- 文件过大，仅转换前 {MAX_TEXT_CHARS} 字符 -->")
+    return result
 
 
 JSON_LIST_CAP = 1000  # JSON 数组项数上限；超出截断并注明（导出类 JSON 动辄数万条，撑爆下游抽取）
@@ -323,9 +329,17 @@ def process_file(file_info: dict, output_dir: Path, content_hashes: dict = None)
 
         # 空内容不写盘：写出只剩 front-matter 的空 .md 会被登记 done，内容永久丢失且无人发现
         if not content.strip():
+            reason = "未提取到文本，疑似扫描版 PDF/空文件"
+            # 已入库源后来被清空：同源旧产物不该继续被 reduce/索引，删除并标注
+            if output_path.exists() and _existing_is_same_source(output_path, source_path):
+                try:
+                    output_path.unlink()
+                    reason += "（旧产物已删除）"
+                except OSError as e:
+                    reason += f"（旧产物删除失败: {e}）"
             return {
                 "status": "empty",
-                "reason": "未提取到文本，疑似扫描版 PDF/空文件",
+                "reason": reason,
                 "source": source_path,
             }
 

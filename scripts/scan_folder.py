@@ -39,6 +39,15 @@ BUILTIN_PRUNE_DIRS = {
     'target', 'build', 'dist', '.obsidian',
 }
 
+# vault==target（就地建库）时需剪掉的已知产物子目录（仅 target 直下生效；
+# .wiki-tree/.obsidian 以 . 开头，已被隐藏目录规则覆盖）
+VAULT_PRODUCT_DIRS = {'documents', 'entities', 'summaries', 'relations'}
+# 同场景下需跳过的 vault 根目录已知产物文件（.md/.json 均为受支持类型，会被回灌）：
+# _index.md 由 generate_wiki_structure 写出；AGENTS.md/kb.json/search-index.json
+# 由 emit_access_bundle 写出；_conversion_report.json 由 convert_documents 写出
+VAULT_PRODUCT_FILES = {'_index.md', 'AGENTS.md', 'kb.json',
+                       'search-index.json', '_conversion_report.json'}
+
 
 def load_manifest(vault):
     """读取增量 manifest 的 processed 段；vault 为空或文件不存在/损坏时返回 {}。"""
@@ -110,9 +119,19 @@ def scan_folder(target_path, vault=None, exclude=None):
     # vault 严格位于扫描目标之内时必须剪掉：否则上一轮产物
     # （documents/entities/summaries 等非隐藏 .md）会被当作源文件回灌，逐轮膨胀
     vault_inside = None
+    vault_is_target = False
     if vault:
         v = Path(vault).resolve()
-        if v != target:
+        if v == target:
+            # vault 就是扫描目标本身：自回灌最彻底的形态——上一轮全部产物都会被当作
+            # 源文件回灌、逐轮膨胀。无法在 os.walk 剪掉根目录，只能剪已知产物子目录。
+            vault_is_target = True
+            print("警告: Vault 与扫描目标是同一目录（就地建库）——上一轮产物会被当作源文件"
+                  "回灌、逐轮膨胀。已剪掉已知产物子目录"
+                  f"（{', '.join(sorted(VAULT_PRODUCT_DIRS))}）与根目录已知产物文件"
+                  f"（{', '.join(sorted(VAULT_PRODUCT_FILES))}），"
+                  "强烈建议把输出目录移出扫描目标。", file=sys.stderr)
+        else:
             try:
                 v.relative_to(target)
                 vault_inside = v
@@ -131,6 +150,8 @@ def scan_folder(target_path, vault=None, exclude=None):
         "excluded_count": 0,
         "exclude_patterns": patterns,
         "vault_excluded": vault_inside is not None,
+        "vault_is_target": vault_is_target,
+        "stale_in_vault": [],
         "builtin_excluded_dirs": [],
     }
 
@@ -148,6 +169,9 @@ def scan_folder(target_path, vault=None, exclude=None):
         # vault 位于扫描目标之内：剪掉 vault 目录本身（resolve 比较，吸收符号链接/相对路径差异）
         if vault_inside is not None:
             dirs[:] = [d for d in dirs if (rootp / d).resolve() != vault_inside]
+        # vault==target（就地建库）：剪掉 target 直下的已知产物子目录，阻断主要回灌面
+        if vault_is_target and rootp == target:
+            dirs[:] = [d for d in dirs if d not in VAULT_PRODUCT_DIRS]
         # 跳过隐藏目录和常见的非文档目录；命中内置集的非隐藏目录记录相对路径
         kept = []
         for d in dirs:
@@ -166,6 +190,10 @@ def scan_folder(target_path, vault=None, exclude=None):
 
         for fname in files:
             fpath = rootp / fname
+            # vault==target：vault 根的已知产物文件同属上一轮产物，跳过（不计入任何计数，
+            # 与产物子目录剪枝同一口径）
+            if vault_is_target and rootp == target and fname in VAULT_PRODUCT_FILES:
+                continue
             # 用户 exclude / .mwignore：命中的文件直接跳过（不计入任何计数）
             if patterns and _is_excluded(fpath.relative_to(target).as_posix(), fname, patterns):
                 results["excluded_count"] += 1
@@ -252,6 +280,28 @@ def scan_folder(target_path, vault=None, exclude=None):
         if orphaned:
             print(f"提示: manifest 中 {len(orphaned)} 个已登记源文件已不存在（孤儿），"
                   f"其产物仍留在 vault 中，见报告 orphaned 字段", file=sys.stderr)
+        # 升级前自回灌进 manifest 的 vault 内路径：源即管线自身产物，确定性垃圾。
+        # 这类条目被 vault 剪枝挡在扫描外（永远"未扫到"），又常因文件仍在盘上
+        # 进不了 orphaned —— 无论 isfile 与否单列可见化，提示清理对应
+        # manifest 条目与 extracted JSON。
+        stale_prefixes = []
+        stale_exact = set()
+        if vault_inside is not None:
+            stale_prefixes.append(os.path.normcase(str(vault_inside)) + os.sep)
+        elif vault_is_target:
+            stale_prefixes += [os.path.normcase(str(target / d)) + os.sep
+                               for d in sorted(VAULT_PRODUCT_DIRS)]
+            stale_exact = {os.path.normcase(str(target / f))
+                           for f in VAULT_PRODUCT_FILES}
+        if stale_prefixes or stale_exact:
+            results["stale_in_vault"] = sorted(
+                orig for norm, orig in manifest_keys.items()
+                if norm in stale_exact or any(norm.startswith(p) for p in stale_prefixes)
+            )
+        if results["stale_in_vault"]:
+            print(f"提示: manifest 中 {len(results['stale_in_vault'])} 个条目的源路径位于 "
+                  f"vault 产物区内（升级前自回灌残留），建议清理对应 manifest 条目与 "
+                  f"extracted JSON，见报告 stale_in_vault 字段", file=sys.stderr)
     else:
         results["incremental"] = False
         plan_total = results["supported_files"]
