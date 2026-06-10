@@ -2,10 +2,15 @@
 """
 wiki-tree 回归测试套件。
 运行: python tests/test_skill.py   （建议先 set PYTHONUTF8=1 / export PYTHONUTF8=1）
-覆盖 6 个脚本的核心行为 + 历次修复：
-  增量(manifest)/并行登记/内容去重/CSV 表格/幻觉闸门/确定性中心度,
-  以及 M1(转换失败→error)、M2(>100 截断)、L2(md GBK 回退)、L6(符号实体词边界)、L7(图谱配色)、F3(UTF-8 stdout)。
-全程用临时目录，不触碰真实数据；任一断言失败则退出码 1。
+覆盖 10 个脚本 + 3 个接入包模板的核心行为 + 历次修复：
+  管线: scan_folder / generate_wiki_structure / convert_documents / update_manifest /
+        verify_entities / compute_centrality / assemble_vault / suggest_dedup
+  接入: emit_access_bundle / kb_register / templates(kb_query · kb_ingest · kb_mcp_server)
+  未覆盖（待补）: emit_doc_summaries / check_deps / templates/kb_hub_server
+  修复: M1(转换失败→error)、M2(>100 截断)、L2(md GBK 回退)、L6(符号实体词边界)、L7(图谱配色)、F3(UTF-8 stdout)。
+全程用临时目录（接入层用假 HOME 重定向 ~），不触碰真实 registry / CLAUDE.md / 用户数据；任一断言失败则退出码 1。
+可选依赖缺失的用例记 SKIP 并计入汇总；CI 用环境变量 EXPECT_SKIPS=N 断言预期跳过数，
+防止「裸环境腿误装了依赖 / 全量腿漏装」这类环境前置条件静默失效。
 """
 import os, re, sys, json, subprocess, tempfile, shutil
 from pathlib import Path
@@ -13,11 +18,16 @@ from pathlib import Path
 SC = Path(__file__).resolve().parent.parent / "scripts"
 PY = sys.executable
 fails = []
+skips = []
 
 def check(name, cond, extra=""):
     print(("  PASS " if cond else "  FAIL ") + name + (f"  [{extra}]" if extra and not cond else ""))
     if not cond:
         fails.append(name)
+
+def skip(name):
+    print("  SKIP " + name)
+    skips.append(name)
 
 def run(*a, env=None):
     r = subprocess.run([PY, *map(str, a)], capture_output=True, text=True,
@@ -123,7 +133,7 @@ def main():
         except ImportError:
             _have_docx = False
         if not _have_docx:
-            print("  SKIP 真实 docx 测试（python-docx 未安装）")
+            skip("真实 docx 测试（python-docx 未安装）")
         else:
             dd = W / "dd"; dd.mkdir()
             docp = dd / "real.docx"
@@ -280,7 +290,7 @@ def main():
         except ImportError:
             _have_pdf = False
         if not _have_pdf:
-            print("  SKIP convert_pdf 测试（PyMuPDF 未安装）")
+            skip("convert_pdf 测试（PyMuPDF 未安装）")
         else:
             pd = W / "pd"; pd.mkdir(); pdfp = pd / "doc.pdf"
             _pdoc = _fitz.open()
@@ -374,13 +384,15 @@ def main():
         (av / "documents/doc2.md").write_text("# doc2\n工具T 概念C", encoding="utf-8")
         exd = av / ".wiki-tree/extracted"
         (exd / "doc1.json").write_text(json.dumps({
-            "doc_id": "doc1", "doc_md": "documents/doc1.md", "short_summary": "文档一概要", "importance": 0.9,
+            "doc_id": "doc1", "doc_md": "documents/doc1.md", "short_summary": "文档一概要",
+            "detailed_summary": "文档一详细摘要：项目P 使用 工具T 与 概念C。", "importance": 0.9,
             "topics": ["主题甲"],
             "entities": [{"kind": "project", "text": "项目P"}, {"kind": "tool", "text": "工具T"}, {"kind": "concept", "text": "概念C"}],
             "relations": [{"subject": "项目P", "predicate": "USES", "object": "工具T", "confidence": 0.9, "evidence": "P 用 T"},
                           {"subject": "项目P", "predicate": "USES", "object": "概念C", "confidence": 0.8}]}, ensure_ascii=False), encoding="utf-8")
         (exd / "doc2.json").write_text(json.dumps({
-            "doc_id": "doc2", "doc_md": "documents/doc2.md", "short_summary": "文档二概要", "importance": 0.5,
+            "doc_id": "doc2", "doc_md": "documents/doc2.md", "short_summary": "文档二概要",
+            "detailed_summary": "文档二详细摘要：工具T 关联 概念C。", "importance": 0.5,
             "topics": ["主题甲"],
             "entities": [{"kind": "tool", "text": "工具T"}, {"kind": "concept", "text": "概念C"}],
             "relations": [{"subject": "工具T", "predicate": "RELATED_TO", "object": "概念C", "confidence": 0.7}]}, ensure_ascii=False), encoding="utf-8")
@@ -416,8 +428,135 @@ def main():
         check("suggest_dedup: 归一化相等候选(Chart.js/chartjs)", tuple(sorted(("Chart.js", "chartjs"))) in pairs, str(pairs))
         check("suggest_dedup: 子串候选(RAG/RAG系统)", any("RAG" in p and "RAG系统" in p for p in pairs), str(pairs))
 
+        # ---------- 15. 接入包全链路: emit_access_bundle → kb.json 契约 → kb_query 四档 ----------
+        print("[15] emit_access_bundle + kb_query")
+        # 前置：emit 硬依赖 centrality.json 与 summaries/topic-*.md（Phase 5/6 产物），复用 [13] 的 av vault
+        run(SC / "compute_centrality.py", "--vault", av, "-o", av / ".wiki-tree/centrality.json")
+        (av / "summaries/topic-主题甲.md").write_text(
+            "# 主题甲\n\n**一句话**：围绕项目P与工具T的测试主题。\n\n要点：项目P 使用 工具T。\n", encoding="utf-8")
+        shutil.copy(SC / "templates/kb_query.py", av / "kb_query.py")
+        shutil.copy(SC / "templates/kb_mcp_server.py", av / "kb_mcp_server.py")
+        run(SC / "emit_access_bundle.py", "--vault", av, "--id", "t", "--name", "测试库",
+            "--scope", "用于测试的知识库", "--extra-use-when", "额外词")
+        kbj = jload(av / "kb.json")
+        check("emit: stats(2 文档/3 实体/3 关系)",
+              kbj["stats"]["documents"] == 2 and kbj["stats"]["entities"] == 3 and kbj["stats"]["relations"] == 3,
+              kbj["stats"])
+        t0 = next((t for t in kbj["topics"] if t["name"] == "主题甲"), None)
+        check("emit: topic 主题甲(docs=2) + one_liner 解析",
+              bool(t0) and t0["docs"] == 2 and t0["one_liner"] == "围绕项目P与工具T的测试主题。", t0)
+        check("emit: use_when=中心度实体+主题+extra",
+              {"项目P", "工具T", "概念C", "主题甲", "额外词"} <= set(kbj["use_when"]), kbj["use_when"])
+        d1idx = next((r for r in jload(av / ".wiki-tree/search-index.json")["docs"] if r["id"] == "doc1"), None)
+        check("emit: search-index 预分词(中文单字+小写英文)",
+              bool(d1idx) and {"概", "p"} <= set(d1idx["tok"]), d1idx and d1idx["tok"][:8])
+        check("emit: AGENTS.md/.mcp.json 生成",
+              "主题甲" in (av / "AGENTS.md").read_text(encoding="utf-8")
+              and "t-kb" in jload(av / ".mcp.json")["mcpServers"])
+        # kb_query 检索 + 四档下钻（kb.json 是 emit↔query 的隐式契约，这里两端对测）
+        q15 = jload_str(run(av / "kb_query.py", "工具T 概念", "--json").stdout)
+        check("query: 候选文档命中且 doc1(imp 0.9)排第一",
+              bool(q15["documents"]) and q15["documents"][0]["path"] == "documents/doc1.md",
+              [d["path"] for d in q15["documents"]])
+        check("query: 主题层命中 主题甲", any(t["name"] == "主题甲" for t in q15["topics"]), q15["topics"])
+        q15d = jload_str(run(av / "kb_query.py", "工具T 概念", "--json", "--level", "detailed").stdout)
+        check("query: --level detailed 附逐文档详细摘要",
+              "详细摘要" in (q15d["documents"][0].get("detailed") or ""))
+        check("query: --topic 取 L1 摘要", "一句话" in run(av / "kb_query.py", "--topic", "主题甲").stdout)
+        ent_out = run(av / "kb_query.py", "--entity", "工具T").stdout
+        check("query: --entity 取实体卡", "工具T" in ent_out and "未找到" not in ent_out, ent_out[:80])
+        rg = run(av / "kb_query.py", "--global")
+        check("query: --global 取 L2 全局摘要", rg.returncode == 0 and rg.stdout.strip() != "")
+        check("query: --list-topics", "主题甲" in run(av / "kb_query.py", "--list-topics").stdout)
+        check("query: --doc full 取 L0 原文",
+              "项目P" in run(av / "kb_query.py", "--doc", "doc1", "--level", "full").stdout)
+        (av / ".wiki-tree/search-index.json").unlink()  # 索引缺失 → 应回退扫 extracted，结果一致
+        q15f = jload_str(run(av / "kb_query.py", "工具T 概念", "--json").stdout)
+        check("query: 无索引回退扫 extracted 结果一致",
+              bool(q15f["documents"]) and q15f["documents"][0]["path"] == "documents/doc1.md")
+        run(SC / "emit_access_bundle.py", "--vault", av, "--id", "t", "--name", "测试库",
+            "--scope", "用于测试的知识库")  # 重建索引（后续节复用 av 的 kb.json）
+        # kb_mcp_server: 缺 MCP SDK 时应干净退出(rc=2)并指引 CLI 兜底（装了 SDK 则跳过；CI 裸腿覆盖此路径）
+        try:
+            import mcp as _mcp  # noqa: F401
+            _have_mcp = True
+        except ImportError:
+            _have_mcp = False
+        if _have_mcp:
+            skip("kb_mcp_server 缺 SDK 退出路径（mcp 已安装）")
+        else:
+            rm = run(av / "kb_mcp_server.py", env=dict(os.environ))
+            check("mcp_server: 缺 SDK → rc=2 + 提示 CLI 兜底",
+                  rm.returncode == 2 and "kb_query" in rm.stderr, (rm.stderr or "")[:120])
+
+        # ---------- 16. kb_register: registry upsert 幂等 + hook managed block 不吞用户内容 ----------
+        print("[16] kb_register（全程临时 registry/hook 文件，不触碰真实 ~）")
+        reg_p = W / "reg.json"; hook_p = W / "hook.md"
+        hook_p.write_text("# 用户手写前置内容\n", encoding="utf-8")
+        run(SC / "kb_register.py", "--vault", av, "--registry", reg_p, "--hook-file", hook_p, "--install-hook")
+        run(SC / "kb_register.py", "--vault", av, "--registry", reg_p, "--hook-file", hook_p, "--install-hook")
+        regd = jload(reg_p)
+        check("register: 同 id 双跑 upsert 幂等(1 条)",
+              len(regd["knowledge_bases"]) == 1 and regd["knowledge_bases"][0]["id"] == "t",
+              [k["id"] for k in regd["knowledge_bases"]])
+        check("register: 条目含 root + query_cli",
+              bool(regd["knowledge_bases"][0].get("root"))
+              and regd["knowledge_bases"][0]["query_cli"].endswith("--json"))
+        ht = hook_p.read_text(encoding="utf-8")
+        check("hook: 双跑后 BEGIN/END 各恰 1 个（无重复块）",
+              ht.count("<!-- KB-HUB:BEGIN") == 1 and ht.count("<!-- KB-HUB:END -->") == 1)
+        check("hook: 块外用户内容保留", "用户手写前置内容" in ht)
+        hook_p.write_text(ht + "\n# 用户手写后置内容\n", encoding="utf-8")
+        vb = W / "vb"; vb.mkdir()
+        (vb / "kb.json").write_text(json.dumps({
+            "id": "b2", "name": "财务库", "scope": "发票报销与增值税财务知识",
+            "use_when": ["发票", "报销", "增值税", "财务"], "stats": {}, "topics": []},
+            ensure_ascii=False), encoding="utf-8")
+        run(SC / "kb_register.py", "--vault", vb, "--registry", reg_p, "--hook-file", hook_p, "--install-hook")
+        regd2 = jload(reg_p)
+        check("register: 第二库登记 + 按 id 排序",
+              [k["id"] for k in regd2["knowledge_bases"]] == ["b2", "t"])
+        ht2 = hook_p.read_text(encoding="utf-8")
+        check("hook: 块内更新为 2 库、块外前/后置内容原样",
+              ht2.count("<!-- KB-HUB:BEGIN") == 1 and "**b2**" in ht2 and "**t**" in ht2
+              and "用户手写前置内容" in ht2 and "用户手写后置内容" in ht2)
+
+        # ---------- 17. kb_ingest: 路由三态 + 暂存 + 回滚（假 HOME 重定向 ~）----------
+        print("[17] kb_ingest（假 HOME，不触碰真实 ~/.knowledge-bases）")
+        KI = SC / "templates/kb_ingest.py"
+        H = W / "home"; (H / ".knowledge-bases").mkdir(parents=True)
+        henv = dict(os.environ, HOME=str(H), USERPROFILE=str(H))
+        hreg = H / ".knowledge-bases/registry.json"
+        run(SC / "kb_register.py", "--vault", av, "--registry", hreg)
+        run(SC / "kb_register.py", "--vault", vb, "--registry", hreg)
+        src17 = W / "src17"; src17.mkdir()
+        f_inv = src17 / "发票合规指南.md"
+        f_inv.write_text("本文讲发票报销流程与增值税专用发票的合规要求。", encoding="utf-8")
+        f_misc = src17 / "随笔.md"
+        f_misc.write_text("今天天气晴朗，出门散步看云。", encoding="utf-8")
+        pl = jload_str(run(KI, f_inv, f_misc, "--plan", "--json", env=henv).stdout)
+        st17 = {p["name"]: p for p in pl["plan"]}
+        check("ingest: 强信号文件高置信判入 b2",
+              st17["发票合规指南.md"]["state"] == "assign" and st17["发票合规指南.md"].get("target") == "b2",
+              st17["发票合规指南.md"])
+        check("ingest: 无关文件判 无匹配(none·不写)",
+              st17["随笔.md"]["state"] == "none", st17["随笔.md"]["state"])
+        sg = jload_str(run(KI, f_inv, "--kb", "b2", "--yes", "--json", env=henv).stdout)
+        staged_p = vb / ".wiki-tree/_ingest/发票合规指南.md"
+        check("ingest: --kb --yes 暂存进目标 inbox + 审计日志",
+              len(sg.get("staged", [])) == 1 and staged_p.exists()
+              and (H / ".knowledge-bases/ingest-log.jsonl").exists(), sg.get("staged"))
+        check("ingest: 原始文件不受损", f_inv.exists() and "增值税" in f_inv.read_text(encoding="utf-8"))
+        rb = run(KI, "--rollback", "发票合规指南.md", "--kb", "b2", env=henv)
+        check("ingest: --rollback 删除暂存副本",
+              "已回滚" in rb.stdout and not staged_p.exists(), (rb.stdout or "")[:120])
+
+        expect = os.environ.get("EXPECT_SKIPS")
+        if expect is not None and len(skips) != int(expect):
+            fails.append(f"skip 数 {len(skips)} != EXPECT_SKIPS {expect}（环境前置条件失效: {skips}）")
         print("\n" + "=" * 40)
-        print("ALL PASS [OK]" if not fails else f"FAILED ({len(fails)}): {fails}")
+        tail = f" ({len(skips)} skipped: {'; '.join(skips)})" if skips else ""
+        print(("ALL PASS [OK]" + tail) if not fails else f"FAILED ({len(fails)}): {fails}" + tail)
         return 1 if fails else 0
     finally:
         shutil.rmtree(W, ignore_errors=True)
