@@ -20,9 +20,11 @@ def create_obsidian_config(vault_path: Path):
     obsidian_dir = vault_path / ".obsidian"
     obsidian_dir.mkdir(parents=True, exist_ok=True)
 
-    # 图谱颜色配置
+    # 图谱颜色配置。键名是 Obsidian 原生 schema 的 camelCase "colorGroups"
+    # （以 Obsidian 自身写出的真实 vault graph.json 为准）；其余图谱设置项
+    # 一律不写，Obsidian 加载时按默认值补齐，避免固化拿不准的字段。
     graph_config = {
-        "color-groups": [
+        "colorGroups": [
             {"query": "tag:#source/local-files", "color": {"a": 1, "rgb": 3066993}},
             {"query": "tag:#person", "color": {"a": 1, "rgb": 10494192}},
             {"query": "tag:#project", "color": {"a": 1, "rgb": 15158332}},
@@ -40,20 +42,18 @@ def create_obsidian_config(vault_path: Path):
         encoding="utf-8"
     )
 
-    # 类型提示配置
-    types_config = {
-        "types": [
-            {"name": "Document", "tag": "source/local-files", "color": "#3498db"},
-            {"name": "Person", "tag": "person", "color": "#e74c3c"},
-            {"name": "Project", "tag": "project", "color": "#2ecc71"},
-            {"name": "Concept", "tag": "concept", "color": "#9b59b6"},
-            {"name": "Summary", "tag": "summary", "color": "#95a5a6"},
-        ]
-    }
-    (obsidian_dir / "types.json").write_text(
-        json.dumps(types_config, indent=2, ensure_ascii=False),
-        encoding="utf-8"
-    )
+    # 不生成 types.json：Obsidian 的 .obsidian/types.json 是 front-matter
+    # 属性名→类型 的映射（{"types": {"<属性>": "text"}}），与实体配色无关。
+    # 旧版本曾写过数组形态的 types.json（无对应功能），重跑时清理掉；
+    # 只删数组形态，对象形态可能是 Obsidian 自己写的属性类型映射，不动。
+    legacy_types = obsidian_dir / "types.json"
+    if legacy_types.exists():
+        try:
+            if isinstance(json.loads(
+                    legacy_types.read_text(encoding="utf-8")).get("types"), list):
+                legacy_types.unlink()
+        except (ValueError, OSError):
+            pass
 
 
 def create_wiki_structure(vault_path: Path):
