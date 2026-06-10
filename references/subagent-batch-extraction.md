@@ -14,7 +14,8 @@
 
 - `vault`：Vault 根目录绝对路径。
 - `doc_paths`：本批要处理的 `documents/*.md` 路径列表（已带 front-matter，其中 `source_path:` 是原始文件路径）。
-- 提示词来源：`references/extraction-prompts.md`（实体提取 = 第 1 节、摘要 = 第 2 节、关系 = 第 3 节）。
+- `skill_root`：**必填**，本 skill 安装目录的绝对路径。你是冷启动会话，下文所有 skill 内资源（提示词文件、校验脚本）都用它定位；缺失时先向主 agent 要，不要凭记忆编提示词或跳过闸门。
+- 提示词来源：`{skill_root}/references/extraction-prompts.md`（实体提取 = 第 1 节、摘要 = 第 2 节、关系 = 第 3 节）。
 
 ## 上下文纪律（关键，别踩坑）
 
@@ -25,13 +26,13 @@
 
 对 `doc_paths` 里的**每一个** `doc_md`，依次：
 
-1. **读取**该 `.md`，从 front-matter 解析出 `source_path`；正文记为 `content`。
-2. **实体提取**：按 `extraction-prompts.md` 第 1 节调用 LLM，得到 `entities / topics / importance / importance_reason`。
-3. **幻觉闸门（确定性脚本）**：用 `python scripts/verify_entities.py --doc <doc_md> --entities <实体JSON>` 过滤——纯 ASCII 实体按**词边界**、含非 ASCII 按**子串**判断是否在原文出现，未出现的丢弃。（跨语言/译名变体的合并不在这里做，留给 reduce 阶段。）
-4. **关系抽取**：按第 3 节，基于过闸后的实体推断 `relations`（只取有明确证据的）。
+1. **读取**该 `.md`，从 front-matter 解析出 `source_path`；正文记为 `content`。注意 `source_path` 的值是 **JSON/YAML 双引号标量**（Windows 路径反斜杠成对转义，如 `"D:\\docs\\a.docx"`），按 YAML 规则还原为真实路径后再写入 `done` 清单。
+2. **实体提取**：按 `{skill_root}/references/extraction-prompts.md` 第 1 节调用 LLM，得到 `entities / topics / importance / importance_reason`。
+3. **幻觉闸门（确定性脚本）**：先把第 2 步的实体 JSON 写入 `<vault>/.wiki-tree/tmp/<doc-id>.entities.json`，再用 `python {skill_root}/scripts/verify_entities.py --doc <doc_md> --entities <vault>/.wiki-tree/tmp/<doc-id>.entities.json` 过滤（`--entities` **只接受文件路径**，不接受内联 JSON 字符串）——纯 ASCII 实体按**词边界**、含非 ASCII 按**子串**判断是否在原文出现，未出现的丢弃。（跨语言/译名变体的合并不在这里做，留给 reduce 阶段。）
+4. **关系抽取**：按第 3 节，基于过闸后的实体推断 `relations`（只取有明确证据的）。**确定性兜底**：丢弃 subject/object 任一端不在过闸实体集中的关系（set 过滤）。
 5. **摘要**：按第 2 节生成 `short_summary / detailed_summary / key_decisions / key_dates / key_people`。
 6. **落盘**：把结果写成 `<vault>/.wiki-tree/extracted/<doc-id>.json`（schema 见下）。`<doc-id>` 取 `doc_md` 的文件名（去扩展名）。
-7. **不在此写 manifest**：把本篇的 `{source_path, doc_md, doc_id}` 累加到本批的 `done` 清单（见下方返回契约）。**登记 manifest 由主 agent 在收齐所有 worker 后串行完成，子 agent 绝不直接调 `update_manifest`。**
+7. **不在此写 manifest**：把本篇的 `{source_path, doc_md, doc_id[, mtime]}` 累加到本批的 `done` 清单（见下方返回契约）。**登记 manifest 由主 agent 在收齐所有 worker 后串行完成，子 agent 绝不直接调 `update_manifest`。**
 
 > **为什么子 agent 不自己写 manifest**：manifest 是单个共享 JSON，多个 worker 并发"读-改-写"会丢更新（原子写只防文件损坏，不防丢更新）。所以分工是：每篇的 `extracted/<doc-id>.json` **各写各的**（文件名唯一、无竞态，可逐篇落盘以抗崩溃）；而对 **manifest 的写入收归主 agent 单一写入者**。即使某篇暂时没被登记，它的 `extracted/<doc-id>.json` 仍在磁盘上、reduce 照样会纳入——最坏只是下一轮多处理它一次，不会重复、不会丢数据。
 
@@ -75,13 +76,16 @@
   "entities_total": 412,
   "relations_total": 173,
   "done": [
-    {"source_path": "/abs/原始文件.docx", "doc_md": "documents/原始文件.md", "doc_id": "原始文件"}
+    {"source_path": "/abs/原始文件.docx", "doc_md": "documents/原始文件.md", "doc_id": "原始文件",
+     "mtime": "2026-05-19T06:00:00+00:00"}
   ],
   "failures": [{"doc_md": "...", "reason": "..."}]
 }
 ```
 
 其中 `done` 是本 worker 成功处理的文档清单，**主 agent 用它来批量登记 manifest**（见下）。
+
+`mtime` 为可选字段：取扫描报告（`<vault>/.wiki-tree/scan.json`）中该 `source_path` 的 `modified_at`（主 agent 分发清单时可一并带上，或 worker 自行从 scan.json 读取）。带上它，fan-in 登记时 `--mark-from` 会按扫描时刻的 mtime 写入 manifest 而非登记时刻重新 stat——消除"抽取期间源文件被改、却被登记成新 mtime → 下一轮误判 done"的时间窗。
 
 主 agent 收齐所有 worker 的返回后：
 

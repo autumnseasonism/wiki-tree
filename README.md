@@ -82,14 +82,17 @@ Agent 会按 `SKILL.md` 的 9 个 Phase 自动编排：扫描 → 转换 → 抽
 
 ```bash
 # 1. 扫描（增量复跑加 --vault）
-python scripts/scan_folder.py <目标文件夹> -o scan.json
-# 2. 转 Markdown
-python scripts/convert_documents.py --scan-report scan.json --output <vault>
-#    ──（抽取：agent 读 documents/ 按 references/extraction-prompts.md 写 .wiki-tree/extracted/*.json）──
-# 3. reduce：中心度 + 装配
+python scripts/scan_folder.py <目标文件夹> -o <vault>/.wiki-tree/scan.json
+# 2. Vault 骨架（.obsidian 配色 / 模板 / .wiki-tree 底座；缺失才建，重跑不覆盖）
+python scripts/generate_wiki_structure.py --output <vault>
+# 3. 转 Markdown
+python scripts/convert_documents.py --scan-report <vault>/.wiki-tree/scan.json --output <vault>
+#    ──（抽取：agent 读 documents/ 按 references/extraction-prompts.md 第 1-3 节写 .wiki-tree/extracted/*.json；
+#       摘要：按第 4/5 节写 summaries/topic-*.md 与 _global-summary.md——emit 的主题/全局档依赖它们）──
+# 4. reduce：中心度 + 装配
 python scripts/compute_centrality.py --vault <vault> -o <vault>/.wiki-tree/centrality.json
 python scripts/assemble_vault.py     --vault <vault>
-# 4. 接入包（让 agent 可检索）
+# 5. 接入包（让 agent 可检索）
 python scripts/emit_access_bundle.py --vault <vault> --id <kebab-id> --name "库名" --scope "一句话简介"
 ```
 
@@ -147,7 +150,10 @@ python scripts/emit_access_bundle.py --vault <vault> --id <kebab-id> --name "库
 ```bash
 python -m pip install python-docx   # 仅当含 .docx
 python -m pip install PyMuPDF       # 仅当含 .pdf
+python -m pip install "mcp[cli]"    # 仅当要挂 MCP 服务（kb_hub_server / kb_mcp_server）；CLI 查询不需要
 ```
+
+一键装全：`python -m pip install -r requirements.txt`；不确定缺什么先跑 `python scripts/check_deps.py` 自检（纯标准库，报告各可选依赖在/缺 + 缺的装啥）。
 
 纯 Markdown / JSON / Text / CSV 语料**无需任何第三方库**。Python 3.8+。
 
@@ -155,10 +161,12 @@ python -m pip install PyMuPDF       # 仅当含 .pdf
 
 ## ❓ FAQ
 
-- **文件太多？** 自动分批、>100 篇优先最近修改的 100 个，下一轮增量自动补齐。
+- **文件太多？** 自动分批、>100 篇优先最近修改的 100 个，下一轮增量复跑（`--vault`）按 manifest 自动补齐，不重不漏；宿主支持子 agent 时可并行 fan-out 加速。
 - **会改原始文件吗？** 不会，只在输出目录新建文件。
-- **扫描版 PDF？** 1.0 暂不内置 OCR，会在报告中标注"需要 OCR"。
-- **没装 Obsidian？** 输出目录就是普通文件夹，`.md` 任何编辑器都能看，只是没有图谱可视化。
+- **扫描版 PDF？** 1.0 暂不内置 OCR；图片型 PDF 提取为空时会在转换报告中单列标记，不会静默当成功。
+- **用 Obsidian 怎么打开？** 输出目录本身就是 Vault——「打开文件夹作为仓库 / Open folder as vault」选中它即可；不存在也不需要叫 `Vault` 的子文件夹。
+- **没装 Obsidian？** 输出目录就是普通文件夹，`.md` 任何编辑器都能看，只是没有图谱/双链可视化。
+- **LLM 调用会不会很多？** 每篇 2-3 次（实体提取 + 摘要 + 可选关系抽取），100 篇约 200-300 次；建议用低成本模型。
 
 ---
 
